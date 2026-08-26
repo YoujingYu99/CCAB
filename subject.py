@@ -1,8 +1,9 @@
-class Subject():
+class Subject:
     """
     Base skeleton class for experimental subjects. \\
     This class is meant to be inherited by specific subject implementations (e.g. ideal observer) and defines the interface that all subjects must implement.
     """
+
     def __init__(self):
         pass
 
