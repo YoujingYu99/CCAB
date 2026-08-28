@@ -6,7 +6,7 @@ import numpy as np
 
 from utils import niceprint
 from subject import Subject
-from idealobserver import IdealObsPFJCRP
+from idealobserver import IdealObsPFJCRP, IdealObsPF
 from utils_sample import cat_sample
 
 
@@ -96,267 +96,48 @@ class IOPFSubjectHistory(SubjectHistory):
         self.weights.append(weights)
 
 
-# class ExperimentalEnv():
-#     """
-#     Class to represent the experimental environment
-#     """
-#     def __init__(self, context_o_params : dict = None, context_r_params : dict = None):
-#         """
-#         Observation and reward contexts are defined by their parameters, which are provided at initialisation.
-
-#         :param dict[int, dict] context_o_params: parameters for observation contexts, of the form {context_id: {state_id: {param_name: param_value}}}
-#         :param dict[int, dict] context_r_params: parameters for reward contexts, of the form {context_id: {state_id: {param_name: param_value}}}
-#         """
-#         self.state_probs = torch.tensor([0.5, 0.5])
-
-
-#         assert type(context_o_params) == dict, "context_o_params must be a dictionary of the form {context_id: context_parameters}"
-#         assert all(isinstance(k, int) for k in context_o_params.keys()), "context_o_params keys must be integers representing context IDs"
-#         assert all(isinstance(v, dict) for v in context_o_params.values()), "context_o_params values must be dictionaries representing context parameters"
-#         self.contexts_o = list(context_o_params.keys())
-
-#         for context_id, context_params in context_o_params.items():
-#             assert all(isinstance(k, int) for k in context_params.keys()), f"State IDs in context_o_params for context {context_id} must be integers"
-#             assert all(isinstance(v, dict) for v in context_params.values()), f"Parameters for each state in context_o_params for context {context_id} must be dictionaries"
-
-#             for state_id, state_params in context_params.items():
-#                 assert "loc" in state_params and "cov" in state_params, f"Parameters for state {state_id} in context_o_params for context {context_id} must include 'loc' and 'cov'"
-#                 assert isinstance(state_params["loc"], torch.Tensor), f"'loc' parameter for state {state_id} in context_o_params for context {context_id} must be a torch.Tensor"
-#                 assert isinstance(state_params["cov"], torch.Tensor), f"'cov' parameter for state {state_id} in context_o_params for context {context_id} must be a torch.Tensor"
-
-#         self.context_o_params : dict[int, dict] = context_o_params
-
-
-#         assert type(context_r_params) == dict, "context_r_params must be a dictionary of the form {context_id: context_parameters}"
-#         assert all(isinstance(k, int) for k in context_r_params.keys()), "context_r_params keys must be integers representing context IDs"
-#         assert all(isinstance(v, dict) for v in context_r_params.values()), "context_r_params values must be dictionaries representing context parameters"
-#         self.contexts_r = list(context_r_params.keys())
-
-#         for context_id, context_params in context_r_params.items():
-#             assert all(isinstance(k, int) for k in context_params.keys()), f"State IDs in context_r_params for context {context_id} must be integers"
-#             assert all(isinstance(v, dict) for v in context_params.values()), f"Parameters for each state in context_r_params for context {context_id} must be dictionaries"
-
-#             for state_id, state_params in context_params.items():
-#                 assert "p_rew" in state_params, f"Parameters for state {state_id} in context_r_params for context {context_id} must include 'p_rew'"
-#                 assert all(isinstance(v, (torch.Tensor)) for v in state_params.values()), f"Reward probabilities in context_r_params for state {state_id} in context {context_id} must be torch.Tensors"
-
-#         self.context_r_params : dict[int, dict] = context_r_params
-
-
-#     def before_action(self, c_o):
-
-#         # Sample states i.i.d. for each trial
-#         s_t = cat_sample(self.state_probs)
-
-#         # Sample observation given the state and observation context
-#         obs_params = self.context_o_params[c_o][s_t]
-#         o_t = D.MultivariateNormal(loc=obs_params["loc"], covariance_matrix=obs_params["cov"]).sample()
-
-#         return s_t, o_t
-
-#     def after_action(self, c_r, s_t, a_t):
-
-#         rew_params = self.context_r_params[c_r][s_t]
-
-#         r_t = D.Bernoulli(probs=rew_params["p_rew"][a_t]).sample().item()
-
-#         opt_a_t = torch.argmax(rew_params["p_rew"]).item()
-
-#         return r_t, opt_a_t
-
-
-#     def trial_step(
-#         self,
-#         subject: Subject,
-#         c_o : int,
-#         c_r : int,
-#         experiment_history: ExperimentHistory,
-#         subject_history: SubjectHistory,
-#         print_level : int = 0
-#         ):
-#         # -------------------------
-#         #   Checks and assertions
-#         # -------------------------
-#         assert isinstance(subject, Subject), "Subject must be an instance of the Subject class or its subclasses"
-#         assert c_o in self.contexts_o, "Observation context must be one of the contexts defined in the environment"
-#         assert c_r in self.contexts_r, "Reward context must be one of the contexts defined in the environment"
-#         assert isinstance(experiment_history, ExperimentHistory), "experiment_history must be an instance of the ExperimentHistory class"
-#         assert isinstance(subject_history, SubjectHistory), "subject_history must be an instance of the SubjectHistory class or its subclasses"
-#         assert print_level in [0, 1, 2, 3], "print_level must be an integer between 0 and 3, inclusive"
-
-
-#         # -----------------
-#         #   Before action
-#         # -----------------
-#         # Environment genreates state, observation and optimal action based on the true contexts
-#         s_t, o_t = self.before_action(c_o)
-
-#         if print_level > 1:
-#             print(f"\tTrue state: {s_t}, Obs.: {niceprint(o_t, 2)}", end='')
-
-#         # Subject processes observation
-#         subject.before_action(o_t)
-
-
-#         # ------------------------
-#         #   Action selection
-#         # ------------------------
-#         a_t = subject.select_action()
-
-
-#         # ----------------
-#         #   After action
-#         # ----------------
-#         # Environment generates reward based on the true state, true reward context and selected action
-#         r_t, opt_a_t = self.after_action(c_r, s_t, a_t)
-
-#         if print_level > 1:
-#             print(f", Action: {a_t}, Reward: {r_t}", end='')
-
-#         # Subject updates internal representations based on the selected action and received reward
-#         subject.after_action(o_t, a_t, r_t)
-
-#         # Record keeping from the experimenter's perspective
-#         experiment_history.append(s_t, c_o, c_r, o_t, opt_a_t, a_t, r_t)
-
-#         # Record keeping from the subject's perspective, depends on the type of subject
-#         if isinstance(subject, IdealObsPF) and isinstance(subject_history, IOPFSubjectHistory):
-#             subject_history.append(
-#                 p_action=subject.p_action,
-#                 p_state=subject.p_state,
-#                 p_jump=subject.p_jump,
-#                 context_o=deepcopy(subject.vec_c_o_t),
-#                 context_r=deepcopy(subject.vec_c_r_t),
-#                 weights=deepcopy(subject.weights)
-#                 )
-#         else:
-#             subject_history.append(p_action=subject.p_action)
-
-
-#         if print_level > 2:
-#             if isinstance(subject, IdealObsPF):
-#                 print(f", Action probs.: {niceprint(subject.p_action, 2)}", end='')
-
-#         if print_level > 1:
-#             print(f"\n", end='')
-
-
-#     def repeat_trials(
-#         self,
-#         subject: Subject,
-#         experiment_history: ExperimentHistory,
-#         subject_history: SubjectHistory,
-#         N : int,
-#         c_o : int,
-#         c_r : int,
-#         print_level : int = 0
-#         ):
-#         """
-#         Run a batch of trials with the given context combination.
-#         """
-
-#         if print_level > 0:
-#             print(f"\n << Running {N} trials with true obs. context = {c_o} and true rew. context = {c_r} >> \n")
-
-#         for i in range(N):
-#             if print_level > 1:
-#                 print(f"Step {i+1}:   ", end='')
-#             # Run a single trial step
-#             self.trial_step(subject, c_o, c_r, experiment_history, subject_history, print_level)
-
-#         if print_level > 0:
-#             print(f"\n >> Batch completed \n")
-
-
-class ExperimentalEnvCRP:
+class ExperimentalEnvBase:
     """
-    Class to represent the experimental environment
+    Base class for experimental environments.
+
+    Contains functionality shared across environments:
+    - trial input validation
+    - reward generation
+    - trial execution
+    - subject/experiment history recording
+    - printing
     """
 
-    def __init__(self, context_o_params: dict = None, context_r_params: dict = None):
-        """
-        Observation and reward contexts are defined by their parameters, which are provided at initialisation.
+    def _check_trial_inputs(
+        self,
+        subject: Subject,
+        experiment_history: ExperimentHistory,
+        subject_history: SubjectHistory,
+        print_level: int,
+    ):
+        assert isinstance(
+            subject, Subject
+        ), "Subject must be an instance of the Subject class or its subclasses"
 
-        :param dict[int, dict] context_o_params: parameters for observation contexts, of the form {context_id: {state_id: {param_name: param_value}}}
-        """
-        self.state_probs = torch.tensor([0.5, 0.5])
+        assert isinstance(
+            experiment_history, ExperimentHistory
+        ), "experiment_history must be an instance of the ExperimentHistory class"
 
-        assert (
-            type(context_o_params) == dict
-        ), "context_o_params must be a dictionary of the form {context_id: context_parameters}"
-        assert all(
-            isinstance(k, int) for k in context_o_params.keys()
-        ), "context_o_params keys must be integers representing context IDs"
-        assert all(
-            isinstance(v, dict) for v in context_o_params.values()
-        ), "context_o_params values must be dictionaries representing context parameters"
-        self.contexts_o = list(context_o_params.keys())
+        assert isinstance(
+            subject_history, SubjectHistory
+        ), "subject_history must be an instance of the SubjectHistory class or its subclasses"
 
-        for context_id, context_params in context_o_params.items():
-            assert all(
-                isinstance(k, int) for k in context_params.keys()
-            ), f"State IDs in context_o_params for context {context_id} must be integers"
-            assert all(
-                isinstance(v, dict) for v in context_params.values()
-            ), f"Parameters for each state in context_o_params for context {context_id} must be dictionaries"
-
-            for state_id, state_params in context_params.items():
-                assert (
-                    "loc" in state_params and "cov" in state_params
-                ), f"Parameters for state {state_id} in context_o_params for context {context_id} must include 'loc' and 'cov'"
-                assert isinstance(
-                    state_params["loc"], torch.Tensor
-                ), f"'loc' parameter for state {state_id} in context_o_params for context {context_id} must be a torch.Tensor"
-                assert isinstance(
-                    state_params["cov"], torch.Tensor
-                ), f"'cov' parameter for state {state_id} in context_o_params for context {context_id} must be a torch.Tensor"
-
-        self.context_o_params: dict[int, dict] = context_o_params
-
-        assert (
-            type(context_r_params) == dict
-        ), "context_r_params must be a dictionary of the form {context_id: context_parameters}"
-        assert all(
-            isinstance(k, int) for k in context_r_params.keys()
-        ), "context_r_params keys must be integers representing context IDs"
-        assert all(
-            isinstance(v, dict) for v in context_r_params.values()
-        ), "context_r_params values must be dictionaries representing context parameters"
-        self.contexts_r = list(context_r_params.keys())
-
-        for context_id, context_params in context_r_params.items():
-            assert all(
-                isinstance(k, int) for k in context_params.keys()
-            ), f"State IDs in context_r_params for context {context_id} must be integers"
-            assert all(
-                isinstance(v, dict) for v in context_params.values()
-            ), f"Parameters for each state in context_r_params for context {context_id} must be dictionaries"
-
-            for state_id, state_params in context_params.items():
-                assert (
-                    "p_rew" in state_params
-                ), f"Parameters for state {state_id} in context_r_params for context {context_id} must include 'p_rew'"
-                assert all(
-                    isinstance(v, (torch.Tensor)) for v in state_params.values()
-                ), f"Reward probabilities in context_r_params for state {state_id} in context {context_id} must be torch.Tensors"
-
-        self.context_r_params: dict[int, dict] = context_r_params
-
-    def before_action(self, c):
-
-        # Sample states i.i.d. for each trial
-        s_t = cat_sample(self.state_probs)
-
-        # Sample observation given the state and observation context
-        obs_params = self.context_o_params[c][s_t]
-        o_t = D.MultivariateNormal(
-            loc=obs_params["loc"], covariance_matrix=obs_params["cov"]
-        ).sample()
-
-        return s_t, o_t
+        assert print_level in [
+            0,
+            1,
+            2,
+            3,
+        ], "print_level must be an integer between 0 and 3, inclusive"
 
     def after_action(self, c, s_t, a_t):
-
+        """
+        Generate reward and optimal action given the context, state and action.
+        """
         rew_params = self.context_r_params[c][s_t]
 
         r_t = D.Bernoulli(probs=rew_params["p_rew"][a_t]).sample().item()
@@ -365,47 +146,30 @@ class ExperimentalEnvCRP:
 
         return r_t, opt_a_t
 
-    def trial_step(
+    def _run_trial(
         self,
         subject: Subject,
-        c: int,
+        c_o: int,
+        c_r: int,
+        s_t,
+        o_t,
         experiment_history: ExperimentHistory,
         subject_history: SubjectHistory,
-        print_level: int = 0,
+        print_level: int,
     ):
-        # -------------------------
-        #   Checks and assertions
-        # -------------------------
-        assert isinstance(
-            subject, Subject
-        ), "Subject must be an instance of the Subject class or its subclasses"
-        assert (
-            c in self.contexts_o
-        ), "Observation context must be one of the contexts defined in the environment"
-        assert (
-            c in self.contexts_r
-        ), "Reward context must be one of the contexts defined in the environment"
-        assert isinstance(
-            experiment_history, ExperimentHistory
-        ), "experiment_history must be an instance of the ExperimentHistory class"
-        assert isinstance(
-            subject_history, SubjectHistory
-        ), "subject_history must be an instance of the SubjectHistory class or its subclasses"
-        assert print_level in [
-            0,
-            1,
-            2,
-            3,
-        ], "print_level must be an integer between 0 and 3, inclusive"
+        """
+        Run the common part of a trial after the environment has generated
+        the state and observation.
+        """
 
         # -----------------
         #   Before action
         # -----------------
-        # Environment genreates state, observation and optimal action based on the true contexts
-        s_t, o_t = self.before_action(c)
-
         if print_level > 1:
-            print(f"\tTrue state: {s_t}, Obs.: {niceprint(o_t, 2)}", end="")
+            print(
+                f"\tTrue state: {s_t}, Obs.: {niceprint(o_t, 2)}",
+                end="",
+            )
 
         # Subject processes observation
         subject.before_action(o_t)
@@ -418,20 +182,41 @@ class ExperimentalEnvCRP:
         # ----------------
         #   After action
         # ----------------
-        # Environment generates reward based on the true state, true reward context and selected action
-        r_t, opt_a_t = self.after_action(c, s_t, a_t)
+        r_t, opt_a_t = self.after_action(c_r, s_t, a_t)
 
         if print_level > 1:
             print(f", Action: {a_t}, Reward: {r_t}", end="")
 
-        # Subject updates internal representations based on the selected action and received reward
+        # Subject updates internal representations
         subject.after_action(o_t, a_t, r_t)
 
-        # Record keeping from the experimenter's perspective
-        experiment_history.append(s_t, c, c, o_t, opt_a_t, a_t, r_t)
+        # ----------------
+        #   Record keeping
+        # ----------------
+        experiment_history.append(
+            s_t,
+            c_o,
+            c_r,
+            o_t,
+            opt_a_t,
+            a_t,
+            r_t,
+        )
 
-        # Record keeping from the subject's perspective, depends on the type of subject
-        if isinstance(subject, IdealObsPFJCRP) and isinstance(
+        # Record keeping from the subject's perspective
+        if isinstance(subject, IdealObsPF) and isinstance(
+            subject_history, IOPFSubjectHistory
+        ):
+            subject_history.append(
+                p_action=subject.p_action,
+                p_state=subject.p_state,
+                p_jump=subject.p_jump,
+                context_o=deepcopy(subject.vec_c_o_t),
+                context_r=deepcopy(subject.vec_c_r_t),
+                weights=deepcopy(subject.weights),
+            )
+
+        elif isinstance(subject, IdealObsPFJCRP) and isinstance(
             subject_history, IOPFSubjectHistory
         ):
             subject_history.append(
@@ -442,15 +227,454 @@ class ExperimentalEnvCRP:
                 context_r=deepcopy(subject.vec_c_t),
                 weights=deepcopy(subject.weights),
             )
+
         else:
             subject_history.append(p_action=subject.p_action)
 
+        # ----------------
+        #   Printing
+        # ----------------
         if print_level > 2:
             if isinstance(subject, IdealObsPFJCRP):
-                print(f", Action probs.: {niceprint(subject.p_action, 2)}", end="")
+                print(
+                    f", Action probs.: {niceprint(subject.p_action, 2)}",
+                    end="",
+                )
 
         if print_level > 1:
-            print(f"\n", end="")
+            print("\n", end="")
+
+
+class ExperimentalEnv(ExperimentalEnvBase):
+    """
+    Class to represent the experimental environment.
+
+    Observation and reward contexts are defined independently.
+    """
+
+    def __init__(
+        self,
+        context_o_params: dict = None,
+        context_r_params: dict = None,
+    ):
+        """
+        Observation and reward contexts are defined by their parameters,
+        which are provided at initialisation.
+
+        :param dict[int, dict] context_o_params:
+            Parameters for observation contexts, of the form
+            {context_id: {state_id: {param_name: param_value}}}
+
+        :param dict[int, dict] context_r_params:
+            Parameters for reward contexts, of the form
+            {context_id: {state_id: {param_name: param_value}}}
+        """
+
+        self.state_probs = torch.tensor([0.5, 0.5])
+
+        # -------------------------
+        #   Observation contexts
+        # -------------------------
+        assert type(context_o_params) == dict, (
+            "context_o_params must be a dictionary of the form "
+            "{context_id: context_parameters}"
+        )
+
+        assert all(
+            isinstance(k, int) for k in context_o_params.keys()
+        ), "context_o_params keys must be integers representing context IDs"
+
+        assert all(isinstance(v, dict) for v in context_o_params.values()), (
+            "context_o_params values must be dictionaries representing "
+            "context parameters"
+        )
+
+        self.contexts_o = list(context_o_params.keys())
+
+        for context_id, context_params in context_o_params.items():
+
+            assert all(isinstance(k, int) for k in context_params.keys()), (
+                f"State IDs in context_o_params for context {context_id} "
+                "must be integers"
+            )
+
+            assert all(isinstance(v, dict) for v in context_params.values()), (
+                f"Parameters for each state in context_o_params for "
+                f"context {context_id} must be dictionaries"
+            )
+
+            for state_id, state_params in context_params.items():
+
+                assert "loc" in state_params and "cov" in state_params, (
+                    f"Parameters for state {state_id} in context_o_params "
+                    f"for context {context_id} must include 'loc' and 'cov'"
+                )
+
+                assert isinstance(
+                    state_params["loc"],
+                    torch.Tensor,
+                ), (
+                    f"'loc' parameter for state {state_id} in "
+                    f"context_o_params for context {context_id} must be "
+                    "a torch.Tensor"
+                )
+
+                assert isinstance(
+                    state_params["cov"],
+                    torch.Tensor,
+                ), (
+                    f"'cov' parameter for state {state_id} in "
+                    f"context_o_params for context {context_id} must be "
+                    "a torch.Tensor"
+                )
+
+        self.context_o_params: dict[int, dict] = context_o_params
+
+        # -------------------------
+        #   Reward contexts
+        # -------------------------
+        assert type(context_r_params) == dict, (
+            "context_r_params must be a dictionary of the form "
+            "{context_id: context_parameters}"
+        )
+
+        assert all(
+            isinstance(k, int) for k in context_r_params.keys()
+        ), "context_r_params keys must be integers representing context IDs"
+
+        assert all(isinstance(v, dict) for v in context_r_params.values()), (
+            "context_r_params values must be dictionaries representing "
+            "context parameters"
+        )
+
+        self.contexts_r = list(context_r_params.keys())
+
+        for context_id, context_params in context_r_params.items():
+
+            assert all(isinstance(k, int) for k in context_params.keys()), (
+                f"State IDs in context_r_params for context {context_id} "
+                "must be integers"
+            )
+
+            assert all(isinstance(v, dict) for v in context_params.values()), (
+                f"Parameters for each state in context_r_params for "
+                f"context {context_id} must be dictionaries"
+            )
+
+            for state_id, state_params in context_params.items():
+
+                assert "p_rew" in state_params, (
+                    f"Parameters for state {state_id} in context_r_params "
+                    f"for context {context_id} must include 'p_rew'"
+                )
+
+                assert all(
+                    isinstance(v, torch.Tensor) for v in state_params.values()
+                ), (
+                    f"Reward probabilities in context_r_params for state "
+                    f"{state_id} in context {context_id} must be torch.Tensors"
+                )
+
+        self.context_r_params: dict[int, dict] = context_r_params
+
+    def before_action(self, c):
+        """
+        Sample state and observation given the observation context.
+        """
+
+        # Sample state i.i.d. for each trial
+        s_t = cat_sample(self.state_probs)
+
+        # Sample observation given the state and observation context
+        obs_params = self.context_o_params[c][s_t]
+
+        o_t = D.MultivariateNormal(
+            loc=obs_params["loc"],
+            covariance_matrix=obs_params["cov"],
+        ).sample()
+
+        return s_t, o_t
+
+    def trial_step(
+        self,
+        subject: Subject,
+        c_o: int,
+        c_r: int,
+        experiment_history: ExperimentHistory,
+        subject_history: SubjectHistory,
+        print_level: int = 0,
+    ):
+        # -------------------------
+        #   Checks and assertions
+        # -------------------------
+        self._check_trial_inputs(
+            subject,
+            experiment_history,
+            subject_history,
+            print_level,
+        )
+
+        assert c_o in self.contexts_o, (
+            "Observation context must be one of the contexts defined "
+            "in the environment"
+        )
+
+        assert c_r in self.contexts_r, (
+            "Reward context must be one of the contexts defined " "in the environment"
+        )
+
+        # -----------------
+        #   Before action
+        # -----------------
+        s_t, o_t = self.before_action(c_o)
+
+        # Run common trial logic
+        self._run_trial(
+            subject,
+            c_o,
+            c_r,
+            s_t,
+            o_t,
+            experiment_history,
+            subject_history,
+            print_level,
+        )
+
+    def repeat_trials(
+        self,
+        subject: Subject,
+        experiment_history: ExperimentHistory,
+        subject_history: SubjectHistory,
+        N: int,
+        c_o: int,
+        c_r: int,
+        print_level: int = 0,
+    ):
+        """
+        Run a batch of trials with the given context combination.
+        """
+
+        if print_level > 0:
+            print(
+                f"\n << Running {N} trials with true obs. context = "
+                f"{c_o} and true rew. context = {c_r} >> \n"
+            )
+
+        for i in range(N):
+
+            if print_level > 1:
+                print(
+                    f"Step {i + 1}:   ",
+                    end="",
+                )
+
+            self.trial_step(
+                subject,
+                c_o,
+                c_r,
+                experiment_history,
+                subject_history,
+                print_level,
+            )
+
+        if print_level > 0:
+            print("\n >> Batch completed \n")
+
+
+class ExperimentalEnvCRP(ExperimentalEnvBase):
+    """
+    Class to represent the experimental environment.
+
+    Observation and reward contexts are coupled and therefore share
+    the same context ID.
+    """
+
+    def __init__(
+        self,
+        context_o_params: dict = None,
+        context_r_params: dict = None,
+    ):
+        """
+        Observation and reward contexts are defined by their parameters,
+        which are provided at initialisation.
+
+        :param dict[int, dict] context_o_params:
+            Parameters for observation contexts, of the form
+            {context_id: {state_id: {param_name: param_value}}}
+
+        :param dict[int, dict] context_r_params:
+            Parameters for reward contexts, of the form
+            {context_id: {state_id: {param_name: param_value}}}
+        """
+
+        self.state_probs = torch.tensor([0.5, 0.5])
+
+        # -------------------------
+        #   Observation contexts
+        # -------------------------
+        assert type(context_o_params) == dict, (
+            "context_o_params must be a dictionary of the form "
+            "{context_id: context_parameters}"
+        )
+
+        assert all(
+            isinstance(k, int) for k in context_o_params.keys()
+        ), "context_o_params keys must be integers representing context IDs"
+
+        assert all(isinstance(v, dict) for v in context_o_params.values()), (
+            "context_o_params values must be dictionaries representing "
+            "context parameters"
+        )
+
+        self.contexts_o = list(context_o_params.keys())
+
+        for context_id, context_params in context_o_params.items():
+
+            assert all(isinstance(k, int) for k in context_params.keys()), (
+                f"State IDs in context_o_params for context {context_id} "
+                "must be integers"
+            )
+
+            assert all(isinstance(v, dict) for v in context_params.values()), (
+                f"Parameters for each state in context_o_params for "
+                f"context {context_id} must be dictionaries"
+            )
+
+            for state_id, state_params in context_params.items():
+
+                assert "loc" in state_params and "cov" in state_params, (
+                    f"Parameters for state {state_id} in context_o_params "
+                    f"for context {context_id} must include 'loc' and 'cov'"
+                )
+
+                assert isinstance(
+                    state_params["loc"],
+                    torch.Tensor,
+                ), (
+                    f"'loc' parameter for state {state_id} in "
+                    f"context_o_params for context {context_id} must be "
+                    "a torch.Tensor"
+                )
+
+                assert isinstance(
+                    state_params["cov"],
+                    torch.Tensor,
+                ), (
+                    f"'cov' parameter for state {state_id} in "
+                    f"context_o_params for context {context_id} must be "
+                    "a torch.Tensor"
+                )
+
+        self.context_o_params: dict[int, dict] = context_o_params
+
+        # -------------------------
+        #   Reward contexts
+        # -------------------------
+        assert type(context_r_params) == dict, (
+            "context_r_params must be a dictionary of the form "
+            "{context_id: context_parameters}"
+        )
+
+        assert all(
+            isinstance(k, int) for k in context_r_params.keys()
+        ), "context_r_params keys must be integers representing context IDs"
+
+        assert all(isinstance(v, dict) for v in context_r_params.values()), (
+            "context_r_params values must be dictionaries representing "
+            "context parameters"
+        )
+
+        self.contexts_r = list(context_r_params.keys())
+
+        for context_id, context_params in context_r_params.items():
+
+            assert all(isinstance(k, int) for k in context_params.keys()), (
+                f"State IDs in context_r_params for context {context_id} "
+                "must be integers"
+            )
+
+            assert all(isinstance(v, dict) for v in context_params.values()), (
+                f"Parameters for each state in context_r_params for "
+                f"context {context_id} must be dictionaries"
+            )
+
+            for state_id, state_params in context_params.items():
+
+                assert "p_rew" in state_params, (
+                    f"Parameters for state {state_id} in context_r_params "
+                    f"for context {context_id} must include 'p_rew'"
+                )
+
+                assert all(
+                    isinstance(v, torch.Tensor) for v in state_params.values()
+                ), (
+                    f"Reward probabilities in context_r_params for state "
+                    f"{state_id} in context {context_id} must be torch.Tensors"
+                )
+
+        self.context_r_params: dict[int, dict] = context_r_params
+
+    def before_action(self, c):
+        """
+        Sample state and observation given the context.
+        """
+
+        # Sample state i.i.d. for each trial
+        s_t = cat_sample(self.state_probs)
+
+        # Sample observation given the state and observation context
+        obs_params = self.context_o_params[c][s_t]
+
+        o_t = D.MultivariateNormal(
+            loc=obs_params["loc"],
+            covariance_matrix=obs_params["cov"],
+        ).sample()
+
+        return s_t, o_t
+
+    def trial_step(
+        self,
+        subject: Subject,
+        c: int,
+        experiment_history: ExperimentHistory,
+        subject_history: SubjectHistory,
+        print_level: int = 0,
+    ):
+        # -------------------------
+        #   Checks and assertions
+        # -------------------------
+        self._check_trial_inputs(
+            subject,
+            experiment_history,
+            subject_history,
+            print_level,
+        )
+
+        assert c in self.contexts_o, (
+            "Observation context must be one of the contexts defined "
+            "in the environment"
+        )
+
+        assert c in self.contexts_r, (
+            "Reward context must be one of the contexts defined " "in the environment"
+        )
+
+        # -----------------
+        #   Before action
+        # -----------------
+        s_t, o_t = self.before_action(c)
+
+        # Run common trial logic
+        self._run_trial(
+            subject,
+            c,
+            c,
+            s_t,
+            o_t,
+            experiment_history,
+            subject_history,
+            print_level,
+        )
 
     def repeat_trials(
         self,
@@ -462,22 +686,192 @@ class ExperimentalEnvCRP:
         print_level: int = 0,
     ):
         """
-        Run a batch of trials with the given context combination.
+        Run a batch of trials with the given context.
         """
 
         if print_level > 0:
             print(f"\n << Running {N} trials with true context = {c} >> \n")
 
         for i in range(N):
+
             if print_level > 1:
-                print(f"Step {i+1}:   ", end="")
-            # Run a single trial step
+                print(
+                    f"Step {i + 1}:   ",
+                    end="",
+                )
+
             self.trial_step(
-                subject, c, experiment_history, subject_history, print_level
+                subject,
+                c,
+                experiment_history,
+                subject_history,
+                print_level,
             )
 
         if print_level > 0:
-            print(f"\n >> Batch completed \n")
+            print("\n >> Batch completed \n")
+
+
+class ExperimentalCRP(ExperimentalEnvBase):
+    """
+    Class to represent the experimental environment.
+
+    Observations, states and contexts are given rather than sampled.
+    """
+
+    def __init__(
+        self,
+        context_r_params: dict = None,
+        contexts: np.ndarray = None,
+        states: np.ndarray = None,
+        observations: np.ndarray = None,
+    ):
+        """
+        :param dict[int, dict] context_r_params:
+            Parameters for reward contexts, of the form
+            {context_id: {state_id: {param_name: param_value}}}
+
+        :param np.ndarray contexts:
+            Integer-valued contexts.
+
+        :param np.ndarray states:
+            Integer-valued states.
+
+        :param np.ndarray observations:
+            Float-valued observations.
+        """
+
+        # -------------------------
+        #   Reward contexts
+        # -------------------------
+        assert type(context_r_params) == dict, (
+            "context_r_params must be a dictionary of the form "
+            "{context_id: context_parameters}"
+        )
+
+        assert all(
+            isinstance(k, int) for k in context_r_params.keys()
+        ), "context_r_params keys must be integers representing context IDs"
+
+        assert all(isinstance(v, dict) for v in context_r_params.values()), (
+            "context_r_params values must be dictionaries representing "
+            "context parameters"
+        )
+
+        self.contexts_r = list(context_r_params.keys())
+
+        for context_id, context_params in context_r_params.items():
+
+            assert all(isinstance(k, int) for k in context_params.keys()), (
+                f"State IDs in context_r_params for context {context_id} "
+                "must be integers"
+            )
+
+            assert all(isinstance(v, dict) for v in context_params.values()), (
+                f"Parameters for each state in context_r_params for "
+                f"context {context_id} must be dictionaries"
+            )
+
+            for state_id, state_params in context_params.items():
+
+                assert "p_rew" in state_params, (
+                    f"Parameters for state {state_id} in context_r_params "
+                    f"for context {context_id} must include 'p_rew'"
+                )
+
+                assert all(
+                    isinstance(v, torch.Tensor) for v in state_params.values()
+                ), (
+                    f"Reward probabilities in context_r_params for state "
+                    f"{state_id} in context {context_id} must be torch.Tensors"
+                )
+
+        self.context_r_params: dict[int, dict] = context_r_params
+
+        # -------------------------
+        #   Pre-generated data
+        # -------------------------
+        self.contexts = contexts.astype(int)
+        self.states = states.astype(int)
+        self.observations = torch.from_numpy(observations)
+
+        self.T = contexts.shape[0]
+
+    def before_action(self, t):
+        """
+        Return the pre-generated context, state and observation.
+        """
+
+        c_t = self.contexts[t]
+        s_t = self.states[t]
+        o_t = self.observations[t]
+
+        return c_t, s_t, o_t
+
+    def trial_step(
+        self,
+        subject: Subject,
+        t: int,
+        experiment_history: ExperimentHistory,
+        subject_history: SubjectHistory,
+        print_level: int = 0,
+    ):
+        # -------------------------
+        #   Checks and assertions
+        # -------------------------
+        self._check_trial_inputs(
+            subject,
+            experiment_history,
+            subject_history,
+            print_level,
+        )
+
+        # -----------------
+        #   Before action
+        # -----------------
+        c_t, s_t, o_t = self.before_action(t)
+
+        # Run common trial logic
+        self._run_trial(
+            subject,
+            c_t,
+            c_t,
+            s_t,
+            o_t,
+            experiment_history,
+            subject_history,
+            print_level,
+        )
+
+    def episode(
+        self,
+        subject: Subject,
+        experiment_history: ExperimentHistory,
+        subject_history: SubjectHistory,
+        print_level: int = 0,
+    ):
+        """
+        Run an episode of trials.
+        """
+
+        for t in range(self.T):
+
+            if print_level > 1:
+                print(
+                    f"Step {t}:   ",
+                    end="",
+                )
+
+            self.trial_step(
+                subject,
+                t,
+                experiment_history,
+                subject_history,
+                print_level,
+            )
+
+        if print_level > 0:
+            print("\n >> Episode completed \n")
 
 
 class CombinedHistory:
