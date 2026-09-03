@@ -506,6 +506,8 @@ class IdealObsPFBase(SPMDWP, Subject):
         w = self.weights.to(torch.float64)
 
         acts = self._last_actions.to(torch.long)
+        # print("w: ", w)
+        # print("acts: ", acts)
 
         p_actions = torch.bincount(
             acts,
@@ -519,6 +521,18 @@ class IdealObsPFBase(SPMDWP, Subject):
         )
 
         return p_actions.detach().numpy()
+    
+    def p_action(self) -> np.ndarray:
+        """
+        Weighted action probabilities at the current time step, inferred from the particles' last sampled actions.
+        """
+        w = self.weights.to(torch.float64)  # [N], sums to 1
+        
+        acts = self._last_actions.to(torch.long)  # [N]
+        p_actions = torch.bincount(acts, weights=w, minlength=4).to(torch.float)
+        p_actions = torch.round(p_actions, decimals=2).detach().numpy()
+
+        return p_actions
 
     # ----------------------------------------------------------------------
     # STATE PROBABILITY

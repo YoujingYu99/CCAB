@@ -580,30 +580,39 @@ class ConjugateCategorical(ConjugateModel):
         return probs[x].item()
 
 
-class SuffStatsWinningArm(SuffStats):
+class SuffStatsOptimalArm(SuffStats):
     """
-    Sufficient statistics for a bandit with exactly one correct/winning arm.
+    Sufficient statistics for the one-optimal-arm model.
 
-    For each action a:
-        succ[a] : soft count of rewards r=1
-        fail[a] : soft count of rewards r=0
+    There is exactly one optimal arm among K arms.
 
-    Unlike SuffStatsBernoulli, these statistics are not interpreted as
-    independent Bernoulli distributions. They are observations used to
-    infer the single latent winning arm.
+    succ[x] = (possibly fractional) number of rewards observed
+              after pulling arm x.
+
+    fail[x] = (possibly fractional) number of non-rewards observed
+              after pulling arm x.
+
+    The sufficient statistics are independent of which arm is hypothesized
+    to be optimal. The posterior over the optimal arm is obtained by
+    comparing the likelihood under each possible optimal-arm hypothesis.
     """
 
-    def __init__(self, K: int):
+    def __init__(self, K: int, dtype=torch.float32, device=None):
+        assert K > 0, f"K must be positive, got {K}"
+
         self.K = K
-        self.succ = torch.zeros(K)
-        self.fail = torch.zeros(K)
+        self.succ = torch.zeros(K, dtype=dtype, device=device)
+        self.fail = torch.zeros(K, dtype=dtype, device=device)
 
     def update(self, a: int, r: float, confidence: float = 1.0):
         """
-        Update with one observation (a, r), where r in {0.0, 1.0}.
+        Add an observation (a, r).
+
+        confidence may be fractional, allowing soft/fractional updates.
         """
         assert 0 <= a < self.K, f"action {a} out of range for {self.K} actions"
-        assert (r == 0.0) or (r == 1.0), f"reward r must be 0.0 or 1.0, got {r}"
+        assert r in (0.0, 1.0), f"reward r must be 0.0 or 1.0, got {r}"
+        assert confidence >= 0.0, f"confidence must be >= 0, got {confidence}"
 
         if r == 1.0:
             self.succ[a] += confidence
@@ -615,194 +624,198 @@ class SuffStatsWinningArm(SuffStats):
 
     @property
     def n(self):
+        """Total number of observations, including fractional counts."""
         return float((self.succ + self.fail).sum().item())
+
+    def reset(self):
+        """Reset all sufficient statistics to zero."""
+        self.succ.zero_()
+        self.fail.zero_()
 
     def to_state(self):
         return {
-            "succ": self.succ,
-            "fail": self.fail,
+            "succ": self.succ.clone(),
+            "fail": self.fail.clone(),
         }
 
     @classmethod
     def from_state(cls, state):
-        K = int(state["succ"].numel())
-        obj = cls(K)
-        obj.succ = state["succ"].clone()
-        obj.fail = state["fail"].clone()
+        succ = state["succ"]
+        fail = state["fail"]
+
+        assert succ.ndim == 1
+        assert fail.ndim == 1
+        assert succ.shape == fail.shape
+
+        obj = cls(
+            K=succ.numel(),
+            dtype=succ.dtype,
+            device=succ.device,
+        )
+        obj.succ = succ.clone()
+        obj.fail = fail.clone()
         return obj
 
 
-class ConjugateWinningArm(ConjugateModel):
+class ConjugateOptimalArm(ConjugateModel):
     """
-    Bayesian model for a K-armed bandit with exactly one winning/correct arm.
+    Bayesian one-optimal-arm model.
 
-    Latent variable:
-        C ~ Categorical(prior)
+    There is exactly one optimal arm k.
 
-    Observation model:
+    Conditional on k:
 
-        r | a, C=a     ~ Bernoulli(p_c)
-        r | a, C!=a    ~ Bernoulli(p_i)
+        P(r=1 | a=k)   = rho_c
+        P(r=1 | a!=k)  = rho_i
 
-    Thus the arms are NOT independent Bernoulli distributions.
+    The prior probability that arm k is optimal is beta0[k].
 
-    Instead, there is a single categorical posterior over which arm is
-    the correct arm.
+    Given sufficient statistics (succ, fail),
+
+        P(k | data) proportional to
+
+            beta0[k]
+            * (rho_c / rho_i) ** succ[k]
+            * ((1-rho_c) / (1-rho_i)) ** fail[k].
+
+    This is evaluated in log-space for numerical stability.
     """
 
-    SUFFSTATS_CLS = SuffStatsWinningArm
+    SUFFSTATS_CLS = SuffStatsOptimalArm
 
     def __init__(
         self,
-        p_c: float,
-        p_i: float,
-        prior: torch.Tensor,
+        rho_c: float,
+        rho_i: float,
+        beta0: torch.Tensor,
     ):
-        """
-        Args:
-            p_c:
-                P(r=1 | selected arm is the correct arm)
+        assert 0.0 < rho_c < 1.0, f"rho_c must be in (0, 1), got {rho_c}"
+        assert 0.0 < rho_i < 1.0, f"rho_i must be in (0, 1), got {rho_i}"
 
-            p_i:
-                P(r=1 | selected arm is NOT the correct arm)
+        assert isinstance(beta0, torch.Tensor), "beta0 must be a torch tensor"
+        assert beta0.ndim == 1, "beta0 must be a 1D tensor"
+        assert beta0.numel() > 0, "beta0 must contain at least one arm"
+        assert torch.all(beta0 > 0), "all beta0 entries must be > 0"
 
-            prior:
-                [K] prior probabilities over which arm is correct.
-                For a uniform prior, use torch.ones(K) / K.
-        """
-        assert isinstance(prior, torch.Tensor), "prior must be a torch tensor"
-        assert prior.dim() == 1, "prior must be a 1D tensor"
-        assert torch.all(prior >= 0), "prior must be >= 0"
         assert torch.isclose(
-            prior.sum(),
-            torch.tensor(1.0, dtype=prior.dtype),
-            atol=1e-5,
-        ), "prior must sum to 1"
+            beta0.sum(),
+            torch.ones((), dtype=beta0.dtype, device=beta0.device),
+            atol=1e-6,
+            rtol=1e-6,
+        ), "beta0 must sum to 1"
 
-        assert 0.0 <= p_c <= 1.0, "p_c must be in [0, 1]"
-        assert 0.0 <= p_i <= 1.0, "p_i must be in [0, 1]"
+        self.rho_c = float(rho_c)
+        self.rho_i = float(rho_i)
 
-        self.p_c = float(p_c)
-        self.p_i = float(p_i)
+        # Preserve the user's dtype/device rather than forcing float32.
+        self.beta0 = beta0.clone()
+        self.K = beta0.numel()
 
-        self.prior = prior.clone().to(torch.float)
-        self.K = int(prior.shape[0])
+        self.suffstats = SuffStatsOptimalArm(
+            self.K,
+            dtype=self.beta0.dtype,
+            device=self.beta0.device,
+        )
 
-        self.suffstats = SuffStatsWinningArm(self.K)
+        # These are constant across all posterior updates.
+        self.log_rho_ratio = self.beta0.new_tensor(self.rho_c / self.rho_i).log()
+
+        self.log_failure_ratio = self.beta0.new_tensor(
+            (1.0 - self.rho_c) / (1.0 - self.rho_i)
+        ).log()
+
+        self.log_beta0 = self.beta0.log()
+
         self.reset_posterior()
 
     def reset_posterior(self):
+        """Reset the posterior to the prior."""
+        self.beta_n = self.beta0.clone()
+
+    def reset(self):
         """
-        Reset posterior to the prior.
+        Reset the entire model to its initial state.
+
+        This resets both sufficient statistics and posterior.
         """
-        self.posterior = self.prior.clone()
+        self.suffstats.reset()
+        self.reset_posterior()
 
-    def update(self, a: int, r: float, confidence: float = 1.0):
+    def update(
+        self,
+        a: int,
+        r: float,
+        confidence: float = 1.0,
+    ):
         """
-        Update posterior with observation (a, r).
-
-        The update is Bayesian:
-
-            posterior(C=k)
-                ∝ prior(C=k) P(r | a, C=k)
-
-        For k=a:
-            P(r=1) = p_c
-            P(r=0) = 1-p_c
-
-        For k!=a:
-            P(r=1) = p_i
-            P(r=0) = 1-p_i
-
-        `confidence` implements a fractional likelihood update.
+        Incorporate observation (a, r) and recompute the posterior.
         """
-        self.suffstats.update(a, r, confidence=confidence)
+        self.suffstats.update(
+            a,
+            r,
+            confidence=confidence,
+        )
         self._update_posterior()
 
     def _update_posterior(self):
         """
-        Recompute:
+        Compute the posterior over the identity of the optimal arm:
 
-            P(C=k | data)
-                ∝ P(C=k)
-                   * product_t P(r_t | a_t, C=k)
+            log P(k | data)
+                = const
+                  + log beta0[k]
+                  + succ[k] * log(rho_c / rho_i)
+                  + fail[k] * log((1-rho_c)/(1-rho_i))
 
-        using the sufficient statistics.
+        followed by normalization with softmax.
         """
         succ, fail = self.suffstats.as_tensors()
 
-        # Log posterior for each possible winning arm.
-        log_post = torch.log(self.prior)
+        log_posterior = (
+            self.log_beta0 + succ * self.log_rho_ratio + fail * self.log_failure_ratio
+        )
 
-        for k in range(self.K):
-            # Observations obtained when pulling k:
-            # these use p_c under hypothesis C=k.
-            log_post[k] += succ[k] * torch.log(torch.tensor(self.p_c)) + fail[
-                k
-            ] * torch.log(torch.tensor(1.0 - self.p_c))
-
-            # Observations obtained from all other arms:
-            # these use p_i under hypothesis C=k.
-            other_succ = succ.sum() - succ[k]
-            other_fail = fail.sum() - fail[k]
-
-            log_post[k] += other_succ * torch.log(
-                torch.tensor(self.p_i)
-            ) + other_fail * torch.log(torch.tensor(1.0 - self.p_i))
-
-        # Normalize in log space for numerical stability.
-        self.posterior = torch.softmax(log_post, dim=0)
+        self.beta_n = torch.softmax(log_posterior, dim=0)
 
     def post_params(self):
-        """
-        Return posterior probabilities for each arm being the winner.
-        """
+        """Posterior categorical distribution over the optimal arm."""
         return {
-            "posterior": self.posterior.clone(),
+            "beta_n": self.beta_n.clone(),
         }
 
     def predictive_p(self):
         """
-        Posterior predictive probability of reward for each action.
+        Posterior predictive probability of reward for each arm a.
 
-        If action a is selected:
+        P(r=1 | a, data)
+            = P(a optimal | data) * rho_c
+              + P(a incorrect | data) * rho_i
 
-            P(r=1 | a, data)
-                = P(C=a | data) * p_c
-                  + P(C!=a | data) * p_i
-
-        Therefore:
-
-            p(a) = p_i + (p_c - p_i) * P(C=a | data)
+            = beta_n[a] * rho_c
+              + (1-beta_n[a]) * rho_i.
         """
-        return self.p_i + (self.p_c - self.p_i) * self.posterior
+        return self.beta_n * self.rho_c + (1.0 - self.beta_n) * self.rho_i
 
     def _pred_dist_params(self):
-        """
-        Returns Bernoulli predictive probability for each action.
-        """
+        """Parameters of the Bernoulli predictive distributions."""
         return self.predictive_p()
 
     def pred_lh(self, a: int, r: float):
         """
-        Predictive likelihood of observing reward r given action a.
+        Predictive likelihood P(r | a, data).
         """
         assert 0 <= a < self.K, f"action {a} out of range for {self.K} actions"
+        assert r in (0.0, 1.0), f"reward r must be 0.0 or 1.0, got {r}"
 
         p = self.predictive_p()[a]
 
-        if r == 1.0:
-            return p
-        elif r == 0.0:
-            return 1.0 - p
-        else:
-            raise ValueError(f"reward r must be 0.0 or 1.0, got {r}")
+        return p if r == 1.0 else 1.0 - p
 
     def sample_post_dist(self):
         """
-        Sample the winning arm from the posterior.
+        Sample the identity of the optimal arm from its posterior.
 
         Returns:
-            Scalar tensor containing the sampled winning arm index.
+            Scalar tensor containing an integer in {0, ..., K-1}.
         """
-        return D.Categorical(probs=self.posterior).sample()
+        return D.Categorical(probs=self.beta_n).sample()
