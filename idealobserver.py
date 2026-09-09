@@ -30,7 +30,7 @@ def pf_worker_loop(
     os.environ["MKL_NUM_THREADS"] = "1"
 
     # Create local particles for this worker
-    local_particles = [Particle(**hyp_params) for _ in particle_indices]
+    local_particles = [Particle(hyp_params) for _ in particle_indices]
     local_logw = torch.zeros(len(local_particles), dtype=torch.float64)
 
     while True:

@@ -1,6 +1,48 @@
 import torch
 import torch.distributions as D
 
+
+class ContextModel():
+    """
+    General interface for a context model. This is an abstract class that should be subclassed to implement specific context models.
+    The methods here provide type hints and documentation for the expected behavior of context models.
+    """
+    def update(self, j_t:int, c_o:int, c_r:int):
+        raise NotImplementedError("Must be implemented in subclass")    
+
+    def to_state(self) -> dict:
+            raise NotImplementedError
+    
+    @classmethod
+    def from_state(cls, state: dict):
+        raise NotImplementedError
+
+    # Some nice guaranteed properties
+    @property
+    def n_contexts_o(self) -> int:
+        raise NotImplementedError("Must be implemented in subclass")
+
+    @property
+    def n_contexts_r(self) -> int:
+        raise NotImplementedError("Must be implemented in subclass")
+
+    @property
+    def prev_c_o(self) -> int:
+        raise NotImplementedError("Must be implemented in subclass")
+
+    @property
+    def prev_c_r(self) -> int:
+        raise NotImplementedError("Must be implemented in subclass")
+
+    @property
+    def probs_c_o(self) -> torch.Tensor:
+        raise NotImplementedError("Must be implemented in subclass")
+
+    @property
+    def probs_c_r(self) -> torch.Tensor:
+        raise NotImplementedError("Must be implemented in subclass")
+
+
 class CRP():
     """
     Class for a Chinese Restaurant Process Prior
@@ -65,7 +107,7 @@ class CRP():
 
 
 
-class CjCRP():
+class CjCRP(ContextModel):
     """
     Class for a coupled jump CRP
     """
@@ -79,22 +121,22 @@ class CjCRP():
         self.CRP_r = CRP(hyp_alpha=alpha_r)
 
         # Due to the jump mixture, we need to keep track of the previous contexts
-        self.prev_c_o = 0
-        self.prev_c_r = 0
-    
-    def update(self, h_t, c_o, c_r):
+        self.var_prev_c_o = 0
+        self.var_prev_c_r = 0
+     
+    def update(self, j_t : int, c_o : int, c_r : int):
         """
         Wrapper function that combines updates to the underlying CRPs.
         """
         # Sufficient statistics are only updated when a jump occurs
-        if h_t == 1:
+        if j_t == 1:
             # Update counts
             self.CRP_o.update(c_o)
             self.CRP_r.update(c_r)
             
             # Update previous context
-            self.prev_c_o = c_o
-            self.prev_c_r = c_r
+            self.var_prev_c_o = c_o
+            self.var_prev_c_r = c_r
 
     def to_state(self):
         """
@@ -103,9 +145,11 @@ class CjCRP():
         return {
             "crp_o_state":  self.CRP_o.to_state(),
             "crp_r_state":  self.CRP_r.to_state(),
-            "prev_c_o":     int(self.prev_c_o),
-            "prev_c_r":     int(self.prev_c_r)
+            "prev_c_o":     int(self.var_prev_c_o),
+            "prev_c_r":     int(self.var_prev_c_r)
         }
+
+
     
     @classmethod
     def from_state(cls, hyp_param:dict, state:dict):
@@ -117,7 +161,32 @@ class CjCRP():
         cjcrp.CRP_o = CRP.from_state(cjcrp.hyp_alpha_o, state["crp_o_state"])
         cjcrp.CRP_r = CRP.from_state(cjcrp.hyp_alpha_r, state["crp_r_state"])
 
-        cjcrp.prev_c_o = state["prev_c_o"]
-        cjcrp.prev_c_r = state["prev_c_r"]
+        cjcrp.var_prev_c_o = state["prev_c_o"]
+        cjcrp.var_prev_c_r = state["prev_c_r"]
 
         return cjcrp
+
+    # Properties for general compatibility with the Particle class 
+    @property
+    def n_contexts_o(self):
+        return self.CRP_o.n_active_contexts
+
+    @property
+    def n_contexts_r(self):
+        return self.CRP_r.n_active_contexts
+
+    @property
+    def prev_c_o(self):
+        return self.var_prev_c_o
+
+    @property
+    def prev_c_r(self):
+        return self.var_prev_c_r
+
+    @property
+    def probs_c_o(self):
+        return self.CRP_o.probs
+
+    @property
+    def probs_c_r(self):
+        return self.CRP_r.probs
