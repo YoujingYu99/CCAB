@@ -492,8 +492,8 @@ class ConjugateOptimalArm(ConjugateModel):
 
         assert 0.0 < rho_c < 1.0, f"rho_c must be in (0, 1), got {rho_c}"
         assert 0.0 < rho_i < 1.0, f"rho_i must be in (0, 1), got {rho_i}"
-        self.rho_c = float(rho_c)
-        self.rho_i = float(rho_i)
+        self.rho_c = torch.tensor(rho_c)
+        self.rho_i = torch.tensor(rho_i)
 
         assert isinstance(beta0, torch.Tensor), "beta0 must be a torch tensor"
         assert beta0.ndim == 1, "beta0 must be a 1D tensor"

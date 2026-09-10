@@ -78,7 +78,6 @@ class IOPFSubjectHistory(SubjectHistory):
         """        
         super().append(p_action) # action probabilities are tracked in the base class
         self.p_state.append(p_state)
-        self.p_action.append(p_action)
         self.p_jump.append(p_jump)
         self.context_o.append(context_o)
         self.context_r.append(context_r)
