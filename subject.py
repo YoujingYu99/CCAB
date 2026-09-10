@@ -1,3 +1,9 @@
+from typing import TypedDict
+from models_context import ContextModel
+from models_obs_rew import ConjugateModel
+
+ 
+
 class Subject():
     """
     Base skeleton class for experimental subjects. \\
@@ -31,3 +37,14 @@ class Subject():
         This property should return the subject's inferred probabilities of selecting each action at the current time step, based on its internal representations.
         """
         pass
+
+class IdealObsParams(TypedDict):
+    """
+    TypedDict for the parameters of a Bayesian ideal observer.
+    """
+    type_context: type[ContextModel]
+    type_obs :    type[ConjugateModel]
+    type_rew :    type[ConjugateModel]
+    hyp_context:  dict
+    hyp_obs:      dict
+    hyp_rew:      dict 

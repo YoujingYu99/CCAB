@@ -1,46 +1,64 @@
+from typing import TypedDict, Literal
+
 import torch
 import torch.distributions as D
 
+
+class ContextHypothesis(TypedDict):
+    """
+    A context hypothesis represents a possible combination of a jump, an observation model, and a reward model.
+    """
+    jump : Literal[0, 1]
+    obs_model : int
+    rew_model : int
 
 class ContextModel():
     """
     General interface for a context model. This is an abstract class that should be subclassed to implement specific context models.
     The methods here provide type hints and documentation for the expected behavior of context models.
     """
-    def update(self, j_t:int, c_o:int, c_r:int):
-        raise NotImplementedError("Must be implemented in subclass")    
+
+    @property
+    def n_hypotheses(self) -> int:
+        return len(self.context_hypotheses)
+
+    @property
+    def hypothesis_probs(self) -> torch.Tensor:
+        """
+        P_C(C_t = c | xi_{t-1}) for all currently possible c.
+        Shape: [n_hypotheses]
+        """
+        raise NotImplementedError
+
+    def hypothesis_o(self, c: int) -> int:
+        """
+        Return the index of the observation model associated with context hypothesis c.
+        """
+        return self.context_hypotheses[c]["obs_model"]
+
+    def hypothesis_r(self, c: int) -> int:
+        """
+        Return the index of the reward model associated with context hypothesis c.
+        """
+        return self.context_hypotheses[c]["rew_model"]
+
+    def hypothesis_jump(self, c: int) -> int:
+        """
+        Return the jump indicator (0 or 1) associated with context hypothesis c.
+        """
+        return self.context_hypotheses[c]["jump"]
+
+    def update(self, c_t: int):
+        raise NotImplementedError
+
+    @classmethod
+    def from_state(cls, hyp_param: dict, state: dict):
+        raise NotImplementedError
 
     def to_state(self) -> dict:
             raise NotImplementedError
+
     
-    @classmethod
-    def from_state(cls, state: dict):
-        raise NotImplementedError
-
-    # Some nice guaranteed properties
-    @property
-    def n_contexts_o(self) -> int:
-        raise NotImplementedError("Must be implemented in subclass")
-
-    @property
-    def n_contexts_r(self) -> int:
-        raise NotImplementedError("Must be implemented in subclass")
-
-    @property
-    def prev_c_o(self) -> int:
-        raise NotImplementedError("Must be implemented in subclass")
-
-    @property
-    def prev_c_r(self) -> int:
-        raise NotImplementedError("Must be implemented in subclass")
-
-    @property
-    def probs_c_o(self) -> torch.Tensor:
-        raise NotImplementedError("Must be implemented in subclass")
-
-    @property
-    def probs_c_r(self) -> torch.Tensor:
-        raise NotImplementedError("Must be implemented in subclass")
 
 
 class CRP():
@@ -111,8 +129,8 @@ class CjCRP(ContextModel):
     """
     Class for a coupled jump CRP
     """
-    def __init__(self,  gamma, alpha_o, alpha_r):
-        self.hyp_gamma =   gamma
+    def __init__(self, gamma : float,  alpha_o : float, alpha_r : float):
+        self.hyp_gamma   = gamma
         self.hyp_alpha_o = alpha_o
         self.hyp_alpha_r = alpha_r
 
@@ -121,22 +139,89 @@ class CjCRP(ContextModel):
         self.CRP_r = CRP(hyp_alpha=alpha_r)
 
         # Due to the jump mixture, we need to keep track of the previous contexts
-        self.var_prev_c_o = 0
-        self.var_prev_c_r = 0
+        self.prev_c_o = 0
+        self.prev_c_r = 0
+
+        # Fill the list of context hypotheses based on the current state of the CRPs
+        self.fill_context_hypotheses()
+
+    def fill_context_hypotheses(self):
+        """
+        Fill the list of context hypotheses based on the current state of the CRPs.
+        Each hypothesis is a combination of a jump (0 or 1), an observation model, and a reward model.
+        """
+        self.context_hypotheses = []
+
+        # If there are no active contexts, we can only have a jump to a new context
+        if self.CRP_o.n_active_contexts == 0 and self.CRP_r.n_active_contexts == 0:
+            self.context_hypotheses.append({
+                "jump": 1,
+                "obs_model": 0,
+                "rew_model": 0
+            })
+
+        # Otherwise
+        else:
+            # J = 0: exactly one possible hypothesis
+            self.context_hypotheses.append({
+                "jump": 0,
+                "obs_model": self.prev_c_o,
+                "rew_model": self.prev_c_r,
+            })
+
+            # J = 1: Cartesian product of CRP possibilities
+            for c_o in range(self.CRP_o.n_active_contexts + 1):
+                for c_r in range(self.CRP_r.n_active_contexts + 1):
+                    self.context_hypotheses.append({
+                        "jump": 1,
+                        "obs_model": c_o,
+                        "rew_model": c_r,
+                    })
+
+    @property
+    def hypothesis_probs(self):
+
+        # If there is only one hypothesis, it must be the stay hypothesis, so its probability is 1
+        if len(self.context_hypotheses) == 1:
+            probs = torch.ones(1)
+
+        # Otherwise, we compute the probabilities for each hypothesis based on the CRP priors and the jump probability
+        else:
+            probs = torch.zeros(self.n_hypotheses)
+
+            # Hypothesis 1 is always the unique stay hypothesis
+            probs[0] = 1.0 - self.hyp_gamma
+
+            # Remaining hypotheses 1, 2, 3 ... are jumps
+            for i, hyp in enumerate(self.context_hypotheses[1:], start=1):
+                c_o = hyp["obs_model"]
+                c_r = hyp["rew_model"]
+
+                probs[i] = (self.hyp_gamma * self.CRP_o.probs[c_o] * self.CRP_r.probs[c_r])
+
+        return probs
      
-    def update(self, j_t : int, c_o : int, c_r : int):
+    def update(self, c_t: int):
         """
         Wrapper function that combines updates to the underlying CRPs.
         """
+        # Extract the jump, obs_model, and rew_model from the current context hypothesis
+        hyp = self.context_hypotheses[c_t]
+        j_t = hyp["jump"]
+        c_o_t = hyp["obs_model"]
+        c_r_t = hyp["rew_model"]
+
         # Sufficient statistics are only updated when a jump occurs
         if j_t == 1:
             # Update counts
-            self.CRP_o.update(c_o)
-            self.CRP_r.update(c_r)
+            self.CRP_o.update(c_o_t)
+            self.CRP_r.update(c_r_t)
             
             # Update previous context
-            self.var_prev_c_o = c_o
-            self.var_prev_c_r = c_r
+            self.prev_c_o = c_o_t
+            self.prev_c_r = c_r_t
+
+            self.fill_context_hypotheses()  # Refill the context hypotheses after the update
 
     def to_state(self):
         """
@@ -145,8 +230,8 @@ class CjCRP(ContextModel):
         return {
             "crp_o_state":  self.CRP_o.to_state(),
             "crp_r_state":  self.CRP_r.to_state(),
-            "prev_c_o":     int(self.var_prev_c_o),
-            "prev_c_r":     int(self.var_prev_c_r)
+            "prev_c_o":     int(self.prev_c_o),
+            "prev_c_r":     int(self.prev_c_r)
         }
 
 
@@ -161,32 +246,9 @@ class CjCRP(ContextModel):
         cjcrp.CRP_o = CRP.from_state(cjcrp.hyp_alpha_o, state["crp_o_state"])
         cjcrp.CRP_r = CRP.from_state(cjcrp.hyp_alpha_r, state["crp_r_state"])
 
-        cjcrp.var_prev_c_o = state["prev_c_o"]
-        cjcrp.var_prev_c_r = state["prev_c_r"]
+        cjcrp.prev_c_o = state["prev_c_o"]
+        cjcrp.prev_c_r = state["prev_c_r"]
+
+        cjcrp.fill_context_hypotheses()  # Refill the context hypotheses after restoring the state
 
         return cjcrp
-
-    # Properties for general compatibility with the Particle class 
-    @property
-    def n_contexts_o(self):
-        return self.CRP_o.n_active_contexts
-
-    @property
-    def n_contexts_r(self):
-        return self.CRP_r.n_active_contexts
-
-    @property
-    def prev_c_o(self):
-        return self.var_prev_c_o
-
-    @property
-    def prev_c_r(self):
-        return self.var_prev_c_r
-
-    @property
-    def probs_c_o(self):
-        return self.CRP_o.probs
-
-    @property
-    def probs_c_r(self):
-        return self.CRP_r.probs
