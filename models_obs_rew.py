@@ -54,20 +54,23 @@ class ConjugateModel:
         """
         Sample from the posterior distribution over parameters.
         """
-        raise NotImplementedError("sample_post_dist method must be implemented by subclass")
+        raise NotImplementedError(
+            "sample_post_dist method must be implemented by subclass"
+        )
 
     def _pred_dist_params(self):
         """
         Return parameters of the posterior predictive distribution.
         """
-        raise NotImplementedError("_pred_dist_params method must be implemented by subclass")
+        raise NotImplementedError(
+            "_pred_dist_params method must be implemented by subclass"
+        )
 
     def pred_lh(self, x):
         """
         Return the predictive likelihood of a new observation x.
         """
         raise NotImplementedError("pred_lh method must be implemented by subclass")
-
 
     # Extra methods for serialization and reconstruction of the model state during resampling of particles in a particle filter.
     def to_state(self) -> dict:
@@ -98,74 +101,144 @@ class ConjugateModel:
         return obj
 
 
-
-
-
-
 class SuffStatsGaussian(SuffStats):
     """
-    Class that maintains the sufficient statistics for a (multivariate) Gaussian distribution.
-    Sufficient statistics are:
-        n: number of observations
-        sum_x: sum of observations
-        sum_xx: sum of outer products of observations
+    Class that maintains the sufficient statistics for a multivariate
+    Gaussian distribution.
+
+    These sufficient statistics are sufficient for both:
+
+        1. ConjugateGaussian
+           Gaussian-Inverse-Wishart model with full covariance.
+
+        2. ConjugateGaussianInvGamma
+           Normal-Inverse-Gamma model with spherical covariance
+           (sigma^2 I).
+
+    Maintained statistics:
+
+        n:
+            Number of observations (possibly fractional via confidence).
+
+        sum_x:
+            Sum of observations:
+                sum_x = Σ_i x_i
+
+        sum_xx:
+            Sum of outer products:
+                sum_xx = Σ_i x_i x_i^T
+
+        sum_x2:
+            Sum of squared Euclidean norms:
+                sum_x2 = Σ_i ||x_i||^2
     """
 
     def __init__(self, d: int):
-        self.n      = 0
-        self.sum_x  = torch.zeros(d)
+        self.d = d
+
+        self.n = 0.0
+        self.sum_x = torch.zeros(d)
         self.sum_xx = torch.zeros(d, d)
+        self.sum_x2 = torch.tensor(0.0)
 
     def update(self, x: torch.Tensor, confidence: float = 1.0):
         """
-        Update sufficient statistics with a new observation x.
-        x: tensor of shape [d]
+        Update sufficient statistics with a new observation.
+
+        Args:
+            x:
+                Tensor of shape [d].
+
+            confidence:
+                Observation weight / fractional count.
         """
+        assert x.dim() == 1
+        assert x.shape[0] == self.d
+
         self.n += confidence
         self.sum_x += confidence * x
         self.sum_xx += confidence * torch.outer(x, x)
+        self.sum_x2 += confidence * torch.dot(x, x)
 
     @property
     def mean(self):
         """
-        Mean of the observations.
+        Empirical mean of the observations.
         """
         if self.n == 0:
             return None
+
         return self.sum_x / self.n
 
     @property
     def scatter(self):
         """
-        S = Σ_i (x_i - x̄)(x_i - x̄)^T = Σ_i (x_i)(x_i)^T - n * (x̄)(x̄)^T
+        Scatter matrix around the empirical mean:
 
-            Scatter around the empirical mean.
+            S = Σ_i (x_i - x_bar)(x_i - x_bar)^T
+
+              = Σ_i x_i x_i^T
+                - n x_bar x_bar^T
+
+        Used by ConjugateGaussian.
         """
         if self.n == 0:
             return None
-        mu = self.mean
-        return self.sum_xx - self.n * torch.outer(mu, mu)
+
+        x_bar = self.mean
+
+        return self.sum_xx - self.n * torch.outer(x_bar, x_bar)
+
+    @property
+    def sse(self):
+        """
+        Sum of squared deviations from the empirical mean:
+
+            SSE = Σ_i ||x_i - x_bar||^2
+
+                = Σ_i ||x_i||^2
+                  - n ||x_bar||^2
+
+        Used by ConjugateGaussianInvGamma.
+        """
+        if self.n == 0:
+            return None
+
+        x_bar = self.mean
+
+        return self.sum_x2 - self.n * torch.dot(x_bar, x_bar)
 
     def to_state(self):
         """
-        Minimal state representation needed to reconstruct the sufficient statistics.
+        Minimal state representation needed to reconstruct the
+        sufficient statistics.
         """
         return {
-            "n":      float(self.n),
-            "sum_x":  self.sum_x,
+            "n": float(self.n),
+            "sum_x": self.sum_x,
             "sum_xx": self.sum_xx,
+            "sum_x2": self.sum_x2,
         }
 
     @classmethod
     def from_state(cls, state):
         """
-        Reconstruct sufficient statistics from its minimal state representation.
+        Reconstruct sufficient statistics from state.
         """
         d = int(state["sum_x"].numel())
+
         obj = cls(d)
+
         obj.n = float(state["n"])
         obj.sum_x = state["sum_x"].clone()
         obj.sum_xx = state["sum_xx"].clone()
+
+        # Support states generated before sum_x2 was added.
+        if "sum_x2" in state:
+            obj.sum_x2 = state["sum_x2"].clone()
+        else:
+            obj.sum_x2 = torch.trace(obj.sum_xx)
+
         return obj
 
 
@@ -185,17 +258,25 @@ class ConjugateGaussian(ConjugateModel):
         assert mu0.dim() == 1, "prior mean mu0 must be a 1D tensor"
         self.mu0 = mu0
 
-        assert (type(kappa0) == float), "pseudocount of prior measurements kappa0 must be a float"
+        assert (
+            type(kappa0) == float
+        ), "pseudocount of prior measurements kappa0 must be a float"
         assert kappa0 > 0, "pseudocount of prior measurements kappa0 must be > 0"
         self.kappa0 = float(kappa0)
 
         assert type(nu0) == float, "nu0 must be a float"
-        assert (nu0 > mu0.shape[0] - 1), f"degrees of freedom nu0 must be > {mu0.shape[0]-1}"
+        assert (
+            nu0 > mu0.shape[0] - 1
+        ), f"degrees of freedom nu0 must be > {mu0.shape[0]-1}"
         self.nu0 = float(nu0)
 
-        assert (type(Lambda0) == torch.Tensor), "scale matrix Lambda0 must be a torch tensor"
+        assert (
+            type(Lambda0) == torch.Tensor
+        ), "scale matrix Lambda0 must be a torch tensor"
         assert Lambda0.dim() == 2, "scale matrix Lambda0 must be a 2D tensor"
-        assert (Lambda0.shape[0] == Lambda0.shape[1] == mu0.shape[0]), "scale matrix Lambda0 must be of shape (d,d)"
+        assert (
+            Lambda0.shape[0] == Lambda0.shape[1] == mu0.shape[0]
+        ), "scale matrix Lambda0 must be of shape (d,d)"
         # check positive definiteness
         eigvals = torch.linalg.eigvalsh(Lambda0)
         assert torch.all(eigvals > 0), "scale matrix Lambda0 must be positive definite"
@@ -226,7 +307,7 @@ class ConjugateGaussian(ConjugateModel):
         """
         Update posterior parameters based on current sufficient statistics.
         """
-        if self.suffstats.n == 0: # do not update posterior if there are no datapoints
+        if self.suffstats.n == 0:  # do not update posterior if there are no datapoints
             return
 
         x_bar = self.suffstats.mean
@@ -236,7 +317,9 @@ class ConjugateGaussian(ConjugateModel):
         """
         μ_n = ( (κ_0 / (κ_0 + n)) * μ0 ) + ( (n / (κ0 + n)) * x̄ )
         """
-        self.mu_n = ((self.kappa0 / (self.kappa0 + n)) * self.mu0) + ((n / (self.kappa0 + n)) * x_bar)
+        self.mu_n = ((self.kappa0 / (self.kappa0 + n)) * self.mu0) + (
+            (n / (self.kappa0 + n)) * x_bar
+        )
 
         # Update posterior of kappa
         """
@@ -255,14 +338,18 @@ class ConjugateGaussian(ConjugateModel):
         Λ_n = Λ_0 + S + ((κ_0 * n )/ (κ_n)) * (x̄ - μ0)(x̄ - μ0)^T
         """
         S = self.suffstats.scatter
-        diff = (x_bar - self.mu0).unsqueeze(1)  # column vector, difference between sample mean and prior mean
-        self.Lambda_n = (self.Lambda0 + S + ((self.kappa0 * n) / (self.kappa_n)) * (diff @ diff.T))
+        diff = (x_bar - self.mu0).unsqueeze(
+            1
+        )  # column vector, difference between sample mean and prior mean
+        self.Lambda_n = (
+            self.Lambda0 + S + ((self.kappa0 * n) / (self.kappa_n)) * (diff @ diff.T)
+        )
 
     def post_params(self):
         return {
-            "mu_n":     self.mu_n,
-            "kappa_n":  self.kappa_n,
-            "nu_n":     self.nu_n,
+            "mu_n": self.mu_n,
+            "kappa_n": self.kappa_n,
+            "nu_n": self.nu_n,
             "Lambda_n": self.Lambda_n,
         }
 
@@ -272,17 +359,21 @@ class ConjugateGaussian(ConjugateModel):
         """
         # Sample covariance matrix
         """
-        To get: Σ ~ IW(ν_n, Λ_n)    
+        To get: Σ ~ IW(ν_n, Λ_n)
         Ω ~ W(ν_n, Λ_n^{-1})        we can sample a precision matrix from the Wishart distribution,
         Σ = Ω^{-1}                  then invert
         """
-        Prec = D.Wishart(df=self.nu_n, covariance_matrix=torch.linalg.inv(self.Lambda_n)).sample()
+        Prec = D.Wishart(
+            df=self.nu_n, covariance_matrix=torch.linalg.inv(self.Lambda_n)
+        ).sample()
         Sigma = torch.linalg.inv(Prec)
         # Sample mean from Gaussian
         """
         μ ~ 𝒩(μ_n, Σ / κ_n)
         """
-        mu = D.MultivariateNormal(loc=self.mu_n, covariance_matrix=(Sigma / self.kappa_n)).sample()
+        mu = D.MultivariateNormal(
+            loc=self.mu_n, covariance_matrix=(Sigma / self.kappa_n)
+        ).sample()
 
         return mu, Sigma
 
@@ -294,8 +385,8 @@ class ConjugateGaussian(ConjugateModel):
         scale = (self.Lambda_n * (self.kappa_n + 1)) / (self.kappa_n * df)
 
         return {
-            "df":    df,
-            "loc":   self.mu_n,
+            "df": df,
+            "loc": self.mu_n,
             "scale": scale,
         }
 
@@ -304,7 +395,277 @@ class ConjugateGaussian(ConjugateModel):
         Returns the predictive likelihood of a new observation x.
         """
         params = self._pred_dist_params()
-        pred_dist = pyroD.MultivariateStudentT(df=params["df"], loc=params["loc"], scale_tril=torch.linalg.cholesky(params["scale"]),)
+        pred_dist = pyroD.MultivariateStudentT(
+            df=params["df"],
+            loc=params["loc"],
+            scale_tril=torch.linalg.cholesky(params["scale"]),
+        )
+        return torch.exp(pred_dist.log_prob(x))
+
+
+class ConjugateGaussianInvGamma(ConjugateModel):
+    """
+    Normal-Inverse-Gamma conjugate model for a spherical multivariate
+    Gaussian:
+
+        x | mu, sigma^2 ~ N(mu, sigma^2 I_d)
+
+        sigma^2 ~ InvGamma(alpha_0, beta_0)
+
+        mu | sigma^2 ~ N(mu_0, sigma^2 / kappa_0 I_d)
+
+    The same scalar sigma^2 is shared across all dimensions.
+
+    Posterior:
+
+        sigma^2 | D ~ InvGamma(alpha_n, beta_n)
+
+        mu | sigma^2, D
+            ~ N(mu_n, sigma^2 / kappa_n I_d)
+
+    where
+
+        kappa_n = kappa_0 + n
+
+        mu_n =
+            (kappa_0 mu_0 + n x_bar) / kappa_n
+
+        alpha_n =
+            alpha_0 + n d / 2
+
+        beta_n =
+            beta_0
+            + 1/2 SSE
+            + (kappa_0 n)/(2 kappa_n)
+              ||x_bar - mu_0||^2
+    """
+
+    SUFFSTATS_CLS = SuffStatsGaussian
+
+    def __init__(
+        self,
+        mu0: torch.Tensor,
+        kappa0: float,
+        alpha0: float,
+        beta0: float,
+    ):
+        """
+        Args:
+            mu0:
+                Prior mean, shape [d].
+
+            kappa0:
+                Prior strength / pseudocount for the mean.
+                Must be > 0.
+
+            alpha0:
+                Shape parameter of the Inverse-Gamma prior.
+                Must be > 0.
+
+            beta0:
+                Scale parameter of the Inverse-Gamma prior.
+                Must be > 0.
+
+        Prior:
+
+            sigma^2 ~ InvGamma(alpha0, beta0)
+
+            mu | sigma^2
+                ~ N(mu0, sigma^2 / kappa0 I_d)
+        """
+
+        assert type(mu0) == torch.Tensor
+        assert mu0.dim() == 1
+
+        assert type(kappa0) == float
+        assert kappa0 > 0
+
+        assert type(alpha0) == float
+        assert alpha0 > 0
+
+        assert type(beta0) == float
+        assert beta0 > 0
+
+        self.mu0 = mu0.clone()
+        self.kappa0 = float(kappa0)
+        self.alpha0 = float(alpha0)
+        self.beta0 = float(beta0)
+
+        self.d = mu0.shape[0]
+
+        # Maintain sufficient statistics.
+        self.suffstats = SuffStatsGaussian(self.d)
+
+        # Initialize posterior to prior.
+        self.reset_posterior()
+
+    def reset_posterior(self):
+        """
+        Reset posterior parameters to the prior.
+        """
+        self.mu_n = self.mu0.clone()
+        self.kappa_n = self.kappa0
+        self.alpha_n = self.alpha0
+        self.beta_n = self.beta0
+
+    def update(self, x: torch.Tensor, confidence: float = 1.0):
+        """
+        Add an observation and update posterior parameters.
+        """
+        self.suffstats.update(x, confidence=confidence)
+        self._update_posterior()
+
+    def _update_posterior(self):
+        """
+        Compute posterior Normal-Inverse-Gamma parameters.
+
+        Posterior:
+
+            sigma^2 | D ~ InvGamma(alpha_n, beta_n)
+
+            mu | sigma^2, D
+                ~ N(mu_n, sigma^2 / kappa_n I_d)
+        """
+
+        if self.suffstats.n == 0:
+            return
+
+        n = self.suffstats.n
+        x_bar = self.suffstats.mean
+        sse = self.suffstats.sse
+
+        # -----------------------------------------
+        # Posterior mean
+        # -----------------------------------------
+        self.kappa_n = self.kappa0 + n
+        self.mu_n = (self.kappa0 * self.mu0 + n * x_bar) / self.kappa_n
+
+        # -----------------------------------------
+        # Posterior alpha
+        # -----------------------------------------
+        self.alpha_n = self.alpha0 + 0.5 * n * self.d
+
+        # -----------------------------------------
+        # Posterior beta
+        # -----------------------------------------
+        diff = x_bar - self.mu0
+
+        between = self.kappa0 * n / (2.0 * self.kappa_n) * torch.dot(diff, diff)
+
+        within = 0.5 * sse
+
+        self.beta_n = self.beta0 + within + between
+
+    def post_params(self):
+        """
+        Return posterior parameters.
+        """
+        return {
+            "mu_n": self.mu_n,
+            "kappa_n": self.kappa_n,
+            "alpha_n": self.alpha_n,
+            "beta_n": self.beta_n,
+        }
+
+    def sample_post_dist(self):
+        """
+        Sample (mu, sigma^2) from the posterior.
+
+        First:
+
+            sigma^2 ~ InvGamma(alpha_n, beta_n)
+
+        Then:
+
+            mu | sigma^2
+                ~ N(mu_n, sigma^2 / kappa_n I_d)
+        """
+
+        # Sample inverse-Gamma distribution
+        #
+        #   If Y ~ Gamma(alpha, rate=beta),
+        #   then 1/Y ~ InvGamma(alpha, beta).
+
+        gamma = D.Gamma(
+            concentration=self.alpha_n,
+            rate=self.beta_n,
+        )
+
+        precision_variance = gamma.sample()
+
+        sigma2 = 1.0 / precision_variance
+
+        # Sample mean conditional on sigma^2.
+        covariance = (sigma2 / self.kappa_n) * torch.eye(
+            self.d,
+            device=self.mu_n.device,
+            dtype=self.mu_n.dtype,
+        )
+
+        mu = D.MultivariateNormal(
+            loc=self.mu_n,
+            covariance_matrix=covariance,
+        ).sample()
+
+        return mu, sigma2
+
+    def _pred_dist_params(self):
+        """
+        Parameters of the multivariate Student-t predictive distribution.
+
+        After integrating out mu and sigma^2:
+
+            x_new | D ~ Multivariate Student-t
+
+        with
+
+            df = 2 alpha_n
+
+            loc = mu_n
+
+            scale =
+                beta_n / alpha_n
+                * (kappa_n + 1) / kappa_n
+                * I_d
+        """
+
+        df = 2.0 * self.alpha_n
+
+        scale_scalar = self.beta_n / self.alpha_n * (self.kappa_n + 1.0) / self.kappa_n
+
+        scale = scale_scalar * torch.eye(
+            self.d,
+            device=self.mu_n.device,
+            dtype=self.mu_n.dtype,
+        )
+
+        return {
+            "df": df,
+            "loc": self.mu_n,
+            "scale": scale,
+        }
+
+    def pred_lh(self, x: torch.Tensor):
+        """
+        Predictive likelihood of a new observation x.
+
+        The predictive distribution is:
+
+            x ~ MultivariateStudentT(
+                df=2 alpha_n,
+                loc=mu_n,
+                scale=scale
+            )
+        """
+
+        params = self._pred_dist_params()
+
+        pred_dist = pyroD.MultivariateStudentT(
+            df=params["df"],
+            loc=params["loc"],
+            scale_tril=torch.linalg.cholesky(params["scale"]),
+        )
+
         return torch.exp(pred_dist.log_prob(x))
 
 
@@ -349,10 +710,7 @@ class SuffStatsRewards(SuffStats):
         """
         Minimal state representation needed to reconstruct the sufficient statistics
         """
-        return {
-            "succ": self.succ, 
-            "fail": self.fail
-            }
+        return {"succ": self.succ, "fail": self.fail}
 
     @classmethod
     def from_state(cls, state):
@@ -381,15 +739,19 @@ class ConjugateBernoulli(ConjugateModel):
         alpha0:     [K] prior pseudo-counts of successes (r=1) per action
         beta0:      [K] prior pseudo-counts of failures  (r=0) per action
         """
-        assert isinstance(alpha0, torch.Tensor) and isinstance(beta0, torch.Tensor), "alpha0 and beta0 must be torch tensors"
-        assert (alpha0.dim() == 1 and beta0.dim() == 1), "alpha0 and beta0 must be 1D tensors"
+        assert isinstance(alpha0, torch.Tensor) and isinstance(
+            beta0, torch.Tensor
+        ), "alpha0 and beta0 must be torch tensors"
+        assert (
+            alpha0.dim() == 1 and beta0.dim() == 1
+        ), "alpha0 and beta0 must be 1D tensors"
         assert alpha0.shape == beta0.shape, "alpha0 and beta0 must have the same shape"
         assert torch.all(alpha0 > 0), "alpha0 must be > 0"
         assert torch.all(beta0 > 0), "beta0 must be > 0"
 
         self.alpha0 = alpha0.clone().to(torch.float)
-        self.beta0  = beta0.clone().to(torch.float)
-        self.K      = int(alpha0.shape[0])
+        self.beta0 = beta0.clone().to(torch.float)
+        self.K = int(alpha0.shape[0])
 
         self.suffstats = SuffStatsRewards(self.K)
         self.reset_posterior()
@@ -399,7 +761,7 @@ class ConjugateBernoulli(ConjugateModel):
         Posterior parameters start at prior.
         """
         self.alpha_n = self.alpha0.clone()
-        self.beta_n  = self.beta0.clone()
+        self.beta_n = self.beta0.clone()
 
     def update(self, a: int, r: float, confidence: float = 1.0):
         """
@@ -415,7 +777,7 @@ class ConjugateBernoulli(ConjugateModel):
             beta_n[a]  = beta0[a]  + fail[a]
         """
 
-        if self.suffstats.n == 0: # do not update posterior if there are no datapoints
+        if self.suffstats.n == 0:  # do not update posterior if there are no datapoints
             return
 
         succ, fail = self.suffstats.as_tensors()
@@ -423,10 +785,7 @@ class ConjugateBernoulli(ConjugateModel):
         self.beta_n = self.beta0 + fail.to(torch.float)
 
     def post_params(self):
-        return {
-            "alpha_n": self.alpha_n, 
-            "beta_n":  self.beta_n
-            }
+        return {"alpha_n": self.alpha_n, "beta_n": self.beta_n}
 
     def sample_post_dist(self):
         """
@@ -440,10 +799,8 @@ class ConjugateBernoulli(ConjugateModel):
         """
         p_rew = self.alpha_n / (self.alpha_n + self.beta_n)
 
-        return {
-            "p_rew": p_rew
-        }
-    
+        return {"p_rew": p_rew}
+
     def pred_lh(self, a: int, r: float):
         """
         Predictive likelihood of observing reward r given action a.
@@ -457,9 +814,6 @@ class ConjugateBernoulli(ConjugateModel):
             return 1.0 - p
         else:
             raise ValueError(f"reward r must be 0.0 or 1.0, got {r}")
-
-    
-
 
 
 class ConjugateOptimalArm(ConjugateModel):
@@ -498,7 +852,9 @@ class ConjugateOptimalArm(ConjugateModel):
         assert isinstance(beta0, torch.Tensor), "beta0 must be a torch tensor"
         assert beta0.ndim == 1, "beta0 must be a 1D tensor"
         assert beta0.numel() >= 2, "beta0 must contain at least two arms"
-        assert torch.all(beta0 > 0), "all beta0 entries must be > 0 to avoid degenerate posteriors"
+        assert torch.all(
+            beta0 > 0
+        ), "all beta0 entries must be > 0 to avoid degenerate posteriors"
         assert torch.sum(beta0) == 1.0, "beta0 must sum to 1.0"
         self.beta0 = beta0.clone()
         self.K = beta0.numel()
@@ -506,7 +862,7 @@ class ConjugateOptimalArm(ConjugateModel):
         self.suffstats = SuffStatsRewards(self.K)
 
         # These are constant across all posterior updates.
-        self.log_rho_ratio     = torch.log(self.rho_c / self.rho_i)
+        self.log_rho_ratio = torch.log(self.rho_c / self.rho_i)
         self.log_failure_ratio = torch.log((1.0 - self.rho_c) / (1.0 - self.rho_i))
 
         self.log_beta0 = self.beta0.log()
@@ -529,18 +885,21 @@ class ConjugateOptimalArm(ConjugateModel):
     def _update_posterior(self):
         """
         Compute the posterior over the identity of the optimal arm:
-            log P(k | data) + log beta0[k] + succ[k] * log(rho_c / rho_i) + fail[k] * log((1-rho_c)/(1-rho_i)) + constant 
+            log P(k | data) + log beta0[k] + succ[k] * log(rho_c / rho_i) + fail[k] * log((1-rho_c)/(1-rho_i)) + constant
         """
         succ, fail = self.suffstats.as_tensors()
-        self.beta_n = torch.softmax(self.log_beta0 + (succ * self.log_rho_ratio) + (fail * self.log_failure_ratio), dim=0)
+        self.beta_n = torch.softmax(
+            self.log_beta0
+            + (succ * self.log_rho_ratio)
+            + (fail * self.log_failure_ratio),
+            dim=0,
+        )
 
     def post_params(self):
         """
         Posterior categorical distribution over the optimal arm.
         """
-        return {
-            "beta_n": self.beta_n
-        }
+        return {"beta_n": self.beta_n}
 
     def sample_post_dist(self):
         """
@@ -557,9 +916,7 @@ class ConjugateOptimalArm(ConjugateModel):
 
         p_rew = self.beta_n * self.rho_c + (1.0 - self.beta_n) * self.rho_i
 
-        return {
-            "p_rew": p_rew
-        }
+        return {"p_rew": p_rew}
 
     def pred_lh(self, a: int, r: float):
         """
