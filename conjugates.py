@@ -328,6 +328,362 @@ class ConjugateGaussian(ConjugateModel):
         return torch.exp(pred_dist.log_prob(x))
 
 
+class SuffStatsGaussianInvGamma(SuffStats):
+    """
+    Sufficient statistics for a spherical multivariate Gaussian:
+
+        x_i ~ N(mu, sigma^2 I_d)
+
+    Maintains:
+        n:       number of observations (possibly fractional via confidence)
+        sum_x:   sum of observations
+        sum_x2:  sum of squared Euclidean norms, i.e. sum_i ||x_i||^2
+
+    These are sufficient for the posterior of:
+        mu | sigma^2 ~ N(mu_n, sigma^2 / kappa_n I)
+        sigma^2      ~ InvGamma(alpha_n, beta_n)
+    """
+
+    def __init__(self, d: int):
+        self.d = d
+        self.n = 0.0
+        self.sum_x = torch.zeros(d)
+        self.sum_x2 = torch.tensor(0.0)
+
+    def update(self, x: torch.Tensor, confidence: float = 1.0):
+        """
+        Add a new observation.
+
+        Args:
+            x: Tensor of shape [d].
+            confidence: Observation weight / fractional count.
+        """
+        assert x.dim() == 1
+        assert x.shape[0] == self.d
+
+        self.n += confidence
+        self.sum_x += confidence * x
+        self.sum_x2 += confidence * torch.dot(x, x)
+
+    @property
+    def mean(self):
+        """
+        Empirical mean.
+        """
+        if self.n == 0:
+            return None
+
+        return self.sum_x / self.n
+
+    @property
+    def sse(self):
+        """
+        Sum of squared deviations from the empirical mean:
+
+            SSE = sum_i ||x_i - x_bar||^2
+
+        This is the sufficient statistic needed for the
+        spherical Gaussian variance.
+        """
+        if self.n == 0:
+            return None
+
+        x_bar = self.mean
+
+        return self.sum_x2 - self.n * torch.dot(x_bar, x_bar)
+
+    def to_state(self):
+        """
+        Minimal state needed to reconstruct the sufficient statistics.
+        """
+        return {
+            "n": float(self.n),
+            "sum_x": self.sum_x,
+            "sum_x2": self.sum_x2,
+        }
+
+    @classmethod
+    def from_state(cls, state):
+        """
+        Reconstruct sufficient statistics from state.
+        """
+        d = int(state["sum_x"].numel())
+
+        obj = cls(d)
+
+        obj.n = float(state["n"])
+        obj.sum_x = state["sum_x"].clone()
+        obj.sum_x2 = state["sum_x2"].clone()
+
+        return obj
+
+
+class ConjugateGaussianInvGamma(ConjugateModel):
+    """
+    Normal-Inverse-Gamma conjugate model for a spherical multivariate
+    Gaussian:
+
+        x | mu, sigma^2 ~ N(mu, sigma^2 I_d)
+
+        sigma^2 ~ InvGamma(alpha_0, beta_0)
+
+        mu | sigma^2 ~ N(mu_0, sigma^2 / kappa_0 I_d)
+
+    The same scalar sigma^2 is shared across all dimensions.
+
+    Posterior:
+
+        sigma^2 | D ~ InvGamma(alpha_n, beta_n)
+
+        mu | sigma^2, D
+            ~ N(mu_n, sigma^2 / kappa_n I_d)
+
+    where
+
+        kappa_n = kappa_0 + n
+
+        mu_n =
+            (kappa_0 mu_0 + n x_bar) / kappa_n
+
+        alpha_n =
+            alpha_0 + n d / 2
+
+        beta_n =
+            beta_0
+            + 1/2 SSE
+            + (kappa_0 n)/(2 kappa_n)
+              ||x_bar - mu_0||^2
+    """
+
+    SUFFSTATS_CLS = SuffStatsGaussianInvGamma
+
+    def __init__(
+        self,
+        mu0: torch.Tensor,
+        kappa0: float,
+        alpha0: float,
+        beta0: float,
+    ):
+        """
+        Args:
+            mu0:
+                Prior mean, shape [d].
+
+            kappa0:
+                Prior strength / pseudocount for the mean.
+                Must be > 0.
+
+            alpha0:
+                Shape parameter of the Inverse-Gamma prior.
+                Must be > 0.
+
+            beta0:
+                Scale parameter of the Inverse-Gamma prior.
+                Must be > 0.
+
+        Prior:
+
+            sigma^2 ~ InvGamma(alpha0, beta0)
+
+            mu | sigma^2
+                ~ N(mu0, sigma^2 / kappa0 I_d)
+        """
+
+        assert type(mu0) == torch.Tensor
+        assert mu0.dim() == 1
+
+        assert type(kappa0) == float
+        assert kappa0 > 0
+
+        assert type(alpha0) == float
+        assert alpha0 > 0
+
+        assert type(beta0) == float
+        assert beta0 > 0
+
+        self.mu0 = mu0.clone()
+        self.kappa0 = float(kappa0)
+        self.alpha0 = float(alpha0)
+        self.beta0 = float(beta0)
+
+        self.d = mu0.shape[0]
+
+        # Maintain sufficient statistics.
+        self.suffstats = SuffStatsGaussianInvGamma(self.d)
+
+        # Initialize posterior to prior.
+        self.reset_posterior()
+
+    def reset_posterior(self):
+        """
+        Reset posterior parameters to the prior.
+        """
+        self.mu_n = self.mu0.clone()
+        self.kappa_n = self.kappa0
+        self.alpha_n = self.alpha0
+        self.beta_n = self.beta0
+
+    def update(self, x: torch.Tensor, confidence: float = 1.0):
+        """
+        Add an observation and update posterior parameters.
+        """
+        self.suffstats.update(x, confidence=confidence)
+        self._update_posterior()
+
+    def _update_posterior(self):
+        """
+        Compute posterior Normal-Inverse-Gamma parameters.
+
+        Posterior:
+
+            sigma^2 | D ~ InvGamma(alpha_n, beta_n)
+
+            mu | sigma^2, D
+                ~ N(mu_n, sigma^2 / kappa_n I_d)
+        """
+
+        if self.suffstats.n == 0:
+            return
+
+        n = self.suffstats.n
+        x_bar = self.suffstats.mean
+        sse = self.suffstats.sse
+
+        # -----------------------------------------
+        # Posterior mean
+        # -----------------------------------------
+        self.kappa_n = self.kappa0 + n
+        self.mu_n = (self.kappa0 * self.mu0 + n * x_bar) / self.kappa_n
+
+        # -----------------------------------------
+        # Posterior alpha
+        # -----------------------------------------
+        self.alpha_n = self.alpha0 + 0.5 * n * self.d
+
+        # -----------------------------------------
+        # Posterior beta
+        # -----------------------------------------
+        diff = x_bar - self.mu0
+
+        between = self.kappa0 * n / (2.0 * self.kappa_n) * torch.dot(diff, diff)
+
+        within = 0.5 * sse
+
+        self.beta_n = self.beta0 + within + between
+
+    def post_params(self):
+        """
+        Return posterior parameters.
+        """
+        return {
+            "mu_n": self.mu_n,
+            "kappa_n": self.kappa_n,
+            "alpha_n": self.alpha_n,
+            "beta_n": self.beta_n,
+        }
+
+    def sample_post_dist(self):
+        """
+        Sample (mu, sigma^2) from the posterior.
+
+        First:
+
+            sigma^2 ~ InvGamma(alpha_n, beta_n)
+
+        Then:
+
+            mu | sigma^2
+                ~ N(mu_n, sigma^2 / kappa_n I_d)
+        """
+
+        # Sample inverse-Gamma distribution
+        #
+        #   If Y ~ Gamma(alpha, rate=beta),
+        #   then 1/Y ~ InvGamma(alpha, beta).
+
+        gamma = D.Gamma(
+            concentration=self.alpha_n,
+            rate=self.beta_n,
+        )
+
+        precision_variance = gamma.sample()
+
+        sigma2 = 1.0 / precision_variance
+
+        # Sample mean conditional on sigma^2.
+        covariance = (sigma2 / self.kappa_n) * torch.eye(
+            self.d,
+            device=self.mu_n.device,
+            dtype=self.mu_n.dtype,
+        )
+
+        mu = D.MultivariateNormal(
+            loc=self.mu_n,
+            covariance_matrix=covariance,
+        ).sample()
+
+        return mu, sigma2
+
+    def _pred_dist_params(self):
+        """
+        Parameters of the multivariate Student-t predictive distribution.
+
+        After integrating out mu and sigma^2:
+
+            x_new | D ~ Multivariate Student-t
+
+        with
+
+            df = 2 alpha_n
+
+            loc = mu_n
+
+            scale =
+                beta_n / alpha_n
+                * (kappa_n + 1) / kappa_n
+                * I_d
+        """
+
+        df = 2.0 * self.alpha_n
+
+        scale_scalar = self.beta_n / self.alpha_n * (self.kappa_n + 1.0) / self.kappa_n
+
+        scale = scale_scalar * torch.eye(
+            self.d,
+            device=self.mu_n.device,
+            dtype=self.mu_n.dtype,
+        )
+
+        return {
+            "df": df,
+            "loc": self.mu_n,
+            "scale": scale,
+        }
+
+    def pred_lh(self, x: torch.Tensor):
+        """
+        Predictive likelihood of a new observation x.
+
+        The predictive distribution is:
+
+            x ~ MultivariateStudentT(
+                df=2 alpha_n,
+                loc=mu_n,
+                scale=scale
+            )
+        """
+
+        params = self._pred_dist_params()
+
+        pred_dist = pyroD.MultivariateStudentT(
+            df=params["df"],
+            loc=params["loc"],
+            scale_tril=torch.linalg.cholesky(params["scale"]),
+        )
+
+        return torch.exp(pred_dist.log_prob(x))
+
+
 class SuffStatsBernoulli(SuffStats):
     """
     Maintains sufficient statistics for a collection of K Bernoulli distributions.
@@ -813,9 +1169,10 @@ class ConjugateOptimalArm(ConjugateModel):
 
     def sample_post_dist(self):
         """
-        Sample the identity of the optimal arm from its posterior.
-
-        Returns:
-            Scalar tensor containing an integer in {0, ..., K-1}.
+        Posterior sample of the optimal arm identity, drawn from the categorical distribution defined by beta_n.
         """
-        return D.Categorical(probs=self.beta_n).sample()
+        best_arm = D.Categorical(probs=self.beta_n).sample()
+        arms = torch.zeros(self.K)
+        arms[best_arm] = 1.0
+
+        return arms
