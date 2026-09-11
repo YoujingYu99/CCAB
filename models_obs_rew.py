@@ -169,7 +169,7 @@ class SuffStatsGaussian(SuffStats):
         return obj
 
 
-class ConjugateGaussian(ConjugateModel):
+class ConjugateGaussianInvWish(ConjugateModel):
     SUFFSTATS_CLS = SuffStatsGaussian
 
     def __init__(self, mu0, kappa0, nu0, Lambda0):
@@ -211,8 +211,8 @@ class ConjugateGaussian(ConjugateModel):
 
     def reset_posterior(self):
         self.mu_n = self.mu0.clone()
-        self.kappa_n = self.kappa0
-        self.nu_n = self.nu0
+        self.kappa_n = self.kappa0.clone()
+        self.nu_n = self.nu0.clone()
         self.Lambda_n = self.Lambda0.clone()
 
     def update(self, x: torch.Tensor, confidence: float = 1.0):
@@ -231,18 +231,20 @@ class ConjugateGaussian(ConjugateModel):
 
         x_bar = self.suffstats.mean
         n = self.suffstats.n
-
-        # Update posterior of mean
-        """
-        μ_n = ( (κ_0 / (κ_0 + n)) * μ0 ) + ( (n / (κ0 + n)) * x̄ )
-        """
-        self.mu_n = ((self.kappa0 / (self.kappa0 + n)) * self.mu0) + ((n / (self.kappa0 + n)) * x_bar)
+        S = self.suffstats.scatter
 
         # Update posterior of kappa
         """
         κ_n = κ_0 + n
         """
         self.kappa_n = self.kappa0 + n
+
+        # Update posterior of mean
+        """
+        μ_n = ( (κ_0 / (κ_n)) * μ0 ) + ( (n / (κ_n)) * x̄ )
+        """
+        self.mu_n = ((self.kappa0 / self.kappa_n) * self.mu0) + ((n / self.kappa_n) * x_bar)
+
 
         # Update posterior of nu
         """
@@ -254,7 +256,6 @@ class ConjugateGaussian(ConjugateModel):
         """
         Λ_n = Λ_0 + S + ((κ_0 * n )/ (κ_n)) * (x̄ - μ0)(x̄ - μ0)^T
         """
-        S = self.suffstats.scatter
         diff = (x_bar - self.mu0).unsqueeze(1)  # column vector, difference between sample mean and prior mean
         self.Lambda_n = (self.Lambda0 + S + ((self.kappa0 * n) / (self.kappa_n)) * (diff @ diff.T))
 
@@ -276,7 +277,7 @@ class ConjugateGaussian(ConjugateModel):
         Ω ~ W(ν_n, Λ_n^{-1})        we can sample a precision matrix from the Wishart distribution,
         Σ = Ω^{-1}                  then invert
         """
-        Prec = D.Wishart(df=self.nu_n, covariance_matrix=torch.linalg.inv(self.Lambda_n)).sample()
+        Prec  = D.Wishart(df=self.nu_n, covariance_matrix=torch.linalg.inv(self.Lambda_n)).sample()
         Sigma = torch.linalg.inv(Prec)
         # Sample mean from Gaussian
         """
@@ -296,6 +297,189 @@ class ConjugateGaussian(ConjugateModel):
         return {
             "df":    df,
             "loc":   self.mu_n,
+            "scale": scale,
+        }
+
+    def pred_lh(self, x: torch.Tensor):
+        """
+        Returns the predictive likelihood of a new observation x.
+        """
+        params = self._pred_dist_params()
+        pred_dist = pyroD.MultivariateStudentT(df=params["df"], loc=params["loc"], scale_tril=torch.linalg.cholesky(params["scale"]),)
+        return torch.exp(pred_dist.log_prob(x))
+
+
+class ConjugateGaussianInvGam(ConjugateModel):
+    """
+    Normal-Inverse-Gamma conjugate model for a spherical multivariate
+    Gaussian:
+
+        x | mu, sigma^2 ~ N(mu, sigma^2 I_d)
+
+        sigma^2 ~ InvGamma(alpha_0, beta_0)
+
+        mu | sigma^2 ~ N(mu_0, sigma^2 / kappa_0 I_d)
+
+    The same scalar sigma^2 is shared across all dimensions.
+
+    Posterior:
+
+        sigma^2 | D ~ InvGamma(alpha_n, beta_n)
+
+        mu | sigma^2, D
+            ~ N(mu_n, sigma^2 / kappa_n I_d)
+
+    where
+
+        kappa_n = kappa_0 + n
+
+        mu_n =
+            (kappa_0 mu_0 + n x_bar) / kappa_n
+
+        alpha_n =
+            alpha_0 + n d / 2
+
+        beta_n =
+            beta_0
+            + 1/2 SSE
+            + (kappa_0 n)/(2 kappa_n)
+              ||x_bar - mu_0||^2
+    """
+
+    SUFFSTATS_CLS = SuffStatsGaussian
+
+    def __init__(self, mu0: torch.Tensor, kappa0: float, alpha0: float, beta0: float):
+        """
+        Conjugate Normal-Inverse-Gamma model for a spherical multivariate Gaussian.
+            mu0:        prior mean, shape [d].
+            kappa0:     Prior strength / pseudocount for the mean.
+            alpha0:     Shape parameter of the Inverse-Gamma prior.
+            beta0:      Scale parameter of the Inverse-Gamma prior.
+        """
+
+        assert type(mu0) == torch.Tensor, "mu0 must be a torch tensor"
+        assert mu0.dim() == 1, "mu0 must be a 1D tensor"
+        self.mu0 = mu0.clone()
+
+        assert type(kappa0) == float, "kappa0 must be a float"
+        assert kappa0 > 0, "kappa0 must be > 0"
+        self.kappa0 = float(kappa0)
+
+        assert type(alpha0) == float, "alpha0 must be a float"
+        assert alpha0 > 0, "alpha0 must be > 0"
+        self.alpha0 = float(alpha0)
+
+        assert type(beta0) == float, "beta0 must be a float"
+        assert beta0 > 0, "beta0 must be > 0"
+        self.beta0 = float(beta0)
+        
+        self.d = mu0.shape[0]
+
+        # Maintain sufficient statistics.
+        self.suffstats = SuffStatsGaussian(self.d)
+
+        # Initialize posterior to prior.
+        self.reset_posterior()
+
+    def reset_posterior(self):
+        self.mu_n = self.mu0.clone()
+        self.kappa_n = self.kappa0.clone()
+        self.alpha_n = self.alpha0.clone()
+        self.beta_n = self.beta0.clone()
+
+    def update(self, x: torch.Tensor, confidence: float = 1.0):
+        """
+        Add an observation and update posterior parameters.
+        """
+        self.suffstats.update(x, confidence=confidence)
+        self._update_posterior()
+
+    def _update_posterior(self):
+        """
+        Update posterior parameters based on current sufficient statistics.
+
+        Posterior:
+
+            sigma^2 | D ~ InvGamma(alpha_n, beta_n)
+
+            mu | sigma^2, D
+                ~ N(mu_n, sigma^2 / kappa_n I_d)
+        """
+        if self.suffstats.n == 0: # do not update posterior if there are no datapoints
+            return
+
+        x_bar = self.suffstats.mean
+        n = self.suffstats.n
+        S = self.suffstats.scatter
+        sse = torch.trace(S)  # sum of squared errors
+
+        # Update posterior of kappa
+        """
+        κ_n = κ_0 + n
+        """
+        self.kappa_n = self.kappa0 + n
+
+        # Update posterior of mean
+        """
+        μ_n = (κ_0 * μ0 + n * x̄) / κ_n
+        """
+        self.mu_n = ((self.kappa0 * self.mu0) + (n * x_bar)) / self.kappa_n
+
+        # update posterior of alpha
+        """
+        α_n = α_0 + (n * d)/2
+        """
+        self.alpha_n = self.alpha0 + (0.5 * n * self.d)
+
+        # update posterior of beta
+        """
+        β_n = β_0 + 1/2 SSE + (κ_0 * n)/(2 κ_n) ||x̄ - μ0||^2
+        """
+        diff = x_bar - self.mu0 # difference between sample mean and prior mean
+        self.beta_n = self.beta0 + ( 0.5 * sse ) + ((self.kappa0 * n) / (2.0 * self.kappa_n) * torch.dot(diff, diff))
+
+    def post_params(self):
+        """
+        Return posterior parameters.
+        """
+        return {
+            "mu_n": self.mu_n,
+            "kappa_n": self.kappa_n,
+            "alpha_n": self.alpha_n,
+            "beta_n": self.beta_n,
+        }
+
+    def sample_post_dist(self):
+        """
+        Sample from the posterior distribution over the mean vector and covariance matrix.
+        """
+
+        # Sample inverse-Gamma distribution
+        """
+        If Y ~ Gamma(alpha, rate=beta),
+        then 1/Y ~ InvGamma(alpha, beta)
+        """
+        prec = D.Gamma(concentration=self.alpha_n, rate=self.beta_n).sample()
+        sigma2 = 1.0 / prec
+        # Sample mean conditional on sigma^2.
+        covariance = (sigma2 / self.kappa_n) * torch.eye(self.d)
+        """
+        μ ~ 𝒩(μ_n, (σ^2 / κ_n) I)
+        """
+        mu = D.MultivariateNormal(loc=self.mu_n, covariance_matrix=covariance).sample()
+
+        return mu, sigma2
+
+    def _pred_dist_params(self):
+        """
+        Parameters of the multivariate Student-t predictive distribution.
+        """
+        df = 2.0 * self.alpha_n
+        scale = ((self.beta_n / self.alpha_n) * (self.kappa_n + 1.0) / self.kappa_n ) * torch.eye(self.d)
+
+        return {
+            "df": df,
+            "loc": self.mu_n,
             "scale": scale,
         }
 

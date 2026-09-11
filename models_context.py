@@ -124,6 +124,121 @@ class CRP():
         return obj
 
 
+class jCRP(ContextModel):
+    """
+    Class for a jump CRP
+    """
+    def __init__(self, gamma: float, alpha: float):
+        self.hyp_gamma = gamma
+        self.hyp_alpha = alpha
+
+        self.CRP = CRP(hyp_alpha=alpha)
+
+        # Due to the jump mixture, we need to keep track of the previous context
+        self.prev_c = 0
+
+        # Fill the list of context hypotheses based on the current state of the CRP
+        self.fill_context_hypotheses()
+
+    def fill_context_hypotheses(self):
+        """
+        Fill the list of context hypotheses based on the current state of the CRP.
+        A single context determines both the observation model and reward model.
+        """
+        self.context_hypotheses = []
+
+        # If there are no active contexts, we can only have a jump to a new context
+        if self.CRP.n_active_contexts == 0:
+            self.context_hypotheses.append({
+                "jump":      1, 
+                "obs_model": 0, 
+                "rew_model": 0
+                })
+
+        # Otherwise
+        else:
+            # J = 0: exactly one possible hypothesis
+            self.context_hypotheses.append(
+                {
+                    "jump":      0,
+                    "obs_model": self.prev_c,
+                    "rew_model": self.prev_c,
+                })
+
+            # J = 1: one hypothesis for each possible CRP context
+            for c in range(self.CRP.n_active_contexts + 1):
+                self.context_hypotheses.append(
+                    {
+                        "jump":      1,
+                        "obs_model": c,
+                        "rew_model": c,
+                    })
+
+    @property
+    def hypothesis_probs(self):
+
+        # If there is only one hypothesis, it must be the jump-to-new-context hypothesis, so its probability is 1
+        if len(self.context_hypotheses) == 1:
+            probs = torch.ones(1)
+
+        # Otherwise, compute probabilities based on the CRP prior and the jump probability
+        else:
+            probs = torch.zeros(self.n_hypotheses)
+
+            # Hypothesis 0 is always the unique stay hypothesis
+            probs[0] = 1.0 - self.hyp_gamma
+
+            # Remaining hypotheses are jumps
+            for i, hyp in enumerate(self.context_hypotheses[1:], start=1):
+                c = hyp["obs_model"]
+
+                # The same context determines both observation and reward models
+                probs[i] = self.hyp_gamma * self.CRP.probs[c]
+
+        return probs
+
+    def update(self, c_t: int):
+        """
+        Wrapper function for updating the underlying CRP.
+        """
+        # Extract the jump and shared context from the current hypothesis
+        hyp = self.context_hypotheses[c_t]
+        j_t = hyp["jump"]
+        c_t = hyp["obs_model"]
+
+        # Sufficient statistics are only updated when a jump occurs
+        if j_t == 1:
+            # Update the single shared context CRP
+            self.CRP.update(c_t)
+
+            # Update previous context
+            self.prev_c = c_t
+
+            self.fill_context_hypotheses()  # Refill the context hypotheses after the update
+
+    def to_state(self):
+        """
+        Minimal state needed to reconstruct the object.
+        """
+        return {
+            "crp_state": self.CRP.to_state(),
+            "prev_c":    int(self.prev_c),
+        }
+
+    @classmethod
+    def from_state(cls, hyp_param: dict, state: dict):
+        """
+        Reconstruct a jCRP object from its minimal state representation.
+        """
+        jcrp = cls(**hyp_param)
+
+        jcrp.CRP = CRP.from_state(jcrp.hyp_alpha, state["crp_state"])
+        jcrp.prev_c = state["prev_c"]
+
+        jcrp.fill_context_hypotheses()  # Refill the context hypotheses after restoring the state
+
+        return jcrp
+
 
 class CjCRP(ContextModel):
     """
@@ -155,7 +270,7 @@ class CjCRP(ContextModel):
         # If there are no active contexts, we can only have a jump to a new context
         if self.CRP_o.n_active_contexts == 0 and self.CRP_r.n_active_contexts == 0:
             self.context_hypotheses.append({
-                "jump": 1,
+                "jump":      1,
                 "obs_model": 0,
                 "rew_model": 0
             })
@@ -164,7 +279,7 @@ class CjCRP(ContextModel):
         else:
             # J = 0: exactly one possible hypothesis
             self.context_hypotheses.append({
-                "jump": 0,
+                "jump":      0,
                 "obs_model": self.prev_c_o,
                 "rew_model": self.prev_c_r,
             })
@@ -173,7 +288,7 @@ class CjCRP(ContextModel):
             for c_o in range(self.CRP_o.n_active_contexts + 1):
                 for c_r in range(self.CRP_r.n_active_contexts + 1):
                     self.context_hypotheses.append({
-                        "jump": 1,
+                        "jump":    1,
                         "obs_model": c_o,
                         "rew_model": c_r,
                     })
