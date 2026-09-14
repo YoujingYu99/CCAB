@@ -211,8 +211,8 @@ class ConjugateGaussianInvWish(ConjugateModel):
 
     def reset_posterior(self):
         self.mu_n = self.mu0.clone()
-        self.kappa_n = self.kappa0.clone()
-        self.nu_n = self.nu0.clone()
+        self.kappa_n = self.kappa0
+        self.nu_n = self.nu0
         self.Lambda_n = self.Lambda0.clone()
 
     def update(self, x: torch.Tensor, confidence: float = 1.0):
@@ -383,9 +383,9 @@ class ConjugateGaussianInvGam(ConjugateModel):
 
     def reset_posterior(self):
         self.mu_n = self.mu0.clone()
-        self.kappa_n = self.kappa0.clone()
-        self.alpha_n = self.alpha0.clone()
-        self.beta_n = self.beta0.clone()
+        self.kappa_n = self.kappa0
+        self.alpha_n = self.alpha0
+        self.beta_n = self.beta0
 
     def update(self, x: torch.Tensor, confidence: float = 1.0):
         """
